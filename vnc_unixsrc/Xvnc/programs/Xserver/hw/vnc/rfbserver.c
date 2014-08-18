@@ -891,6 +891,12 @@ rfbProcessClientNormalMessage(cl)
 
 	str = (char *)xalloc(msg.cct.length);
 
+	if (str == NULL) {
+		rfbLogPerror("rfbProcessClientNormalMessage: not enough memory");
+		rfbCloseSock(cl->sock);
+		return;
+	}
+
 	if ((n = ReadExact(cl->sock, str, msg.cct.length)) <= 0) {
 	    if (n != 0)
 		rfbLogPerror("rfbProcessClientNormalMessage: read");
