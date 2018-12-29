@@ -1293,6 +1293,10 @@ ReadConnFailedReason(void)
 
   if (ReadFromRFBServer((char *)&reasonLen, sizeof(reasonLen))) {
     reasonLen = Swap32IfLE(reasonLen);
+    if(reasonLen > 1<<20) {
+      fprintf(stderr, "VNC connection failed, but sent reason length of %u exceeds limit of 1MB",(unsigned int)reasonLen);
+      return;
+    }
     if ((reason = malloc(reasonLen)) != NULL &&
         ReadFromRFBServer(reason, reasonLen)) {
       fprintf(stderr,"%.*s\n", (int)reasonLen, reason);
