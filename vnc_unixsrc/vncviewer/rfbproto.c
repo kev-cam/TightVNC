@@ -1214,6 +1214,11 @@ HandleRFBServerMessage()
 
     msg.sct.length = Swap32IfLE(msg.sct.length);
 
+    if (msg.sct.length > 1<<20) {
+	    fprintf(stderr, "Ignoring too big cut text length sent by server: %u B > 1 MB\n", (unsigned int)msg.sct.length);
+	    return False;
+    }
+
     if (serverCutText)
       free(serverCutText);
 
