@@ -303,13 +303,11 @@ InitialiseRFBConnection(void)
   si.format.blueMax = Swap16IfLE(si.format.blueMax);
   si.nameLength = Swap32IfLE(si.nameLength);
 
-  /* FIXME: Check arguments to malloc() calls. */
-  desktopName = malloc(si.nameLength + 1);
-  if (!desktopName) {
-    fprintf(stderr, "Error allocating memory for desktop name, %lu bytes\n",
-            (unsigned long)si.nameLength);
-    return False;
+  if (si.nameLength > 1<<20) {
+      fprintf(stderr, "Too big desktop name length sent by server: %u B > 1 MB\n", (unsigned int)si.nameLength);
+      return FALSE;
   }
+  desktopName = malloc(si.nameLength + 1);
 
   if (!ReadFromRFBServer(desktopName, si.nameLength)) return False;
 
