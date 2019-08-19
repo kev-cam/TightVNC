@@ -1481,6 +1481,8 @@ rfbSendServerCutText(char *str, int len)
     rfbClientPtr cl, nextCl;
     rfbServerCutTextMsg sct;
 
+    memset((char *)&sct, 0, sizeof(sct));
+
     if (rfbViewOnly)
 	return;
 
