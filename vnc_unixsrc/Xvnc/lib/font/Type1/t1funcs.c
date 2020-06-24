@@ -691,7 +691,7 @@ int Type1ReturnCodeToXReturnCode(rc)
 	/* fall through */
     default:
 	/* this should not happen */
-	ErrorF("Type1 return code not convertable to X return code: %d\n", rc);
+	ErrorF("Type1 return code not convertible to X return code: %d\n", rc);
 	return rc;
     }
 }

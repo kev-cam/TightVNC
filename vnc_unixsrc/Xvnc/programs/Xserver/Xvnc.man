@@ -64,7 +64,7 @@ the viewer display.
 UDP port for keyboard/pointer data.
 .TP
 \fB\-rfbport\fR \fIport\fR
-TCP port for RFB protocol. The RFB protocol is used for commnunication
+TCP port for RFB protocol. The RFB protocol is used for communication
 between VNC server and clients.
 .TP
 \fB\-rfbwait\fR \fItime\fR
@@ -137,7 +137,7 @@ version of Xvnc by AT&T labs (TightVNC-specific).
 .SH BUGS
 There are many security problems in current Xvnc implementation. It's
 recommended to restrict network access to Xvnc servers from untrusted
-network adresses. Probably, the best way to secure Xvnc server is to
+network addresses. Probably, the best way to secure Xvnc server is to
 allow only loopback connections from the server machine (the
 \fI\-localhost\fR option) and to use SSH tunneling for remote access
 to the Xvnc server. For details on SSH tunneling, see

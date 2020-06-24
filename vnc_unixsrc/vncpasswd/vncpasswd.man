@@ -29,8 +29,8 @@ passwords for the TightVNC server authentication. \fBXvnc\fR uses such
 passwords when started with the \fB\-rfbauth\fR command-line option
 (or when started from the \fBvncserver\fR script).
 
-\fBvncpasswd\fR allows to enter either one or two passwords. The first
-password is the primary one, the second password can be used for
+\fBvncpasswd\fR allows one to enter either one or two passwords. The
+first password is the primary one, the second password can be used for
 view-only authentication. \fBXvnc\fR will restrict mouse and keyboard
 input from clients who authenticated with the view-only password. The
 \fBvncpasswd\fR utility asks interactively if it should set the second
