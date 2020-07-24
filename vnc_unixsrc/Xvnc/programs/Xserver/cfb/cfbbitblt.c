@@ -666,7 +666,7 @@ cfbCopyPlane1to8 (pSrcDrawable, pDstDrawable, rop, prgnDst, pptSrc, planemask, b
 #endif
 
 /* shared among all different cfb depths through linker magic */
-RegionPtr   (*cfbPuntCopyPlane)();
+RegionPtr   (*cfbPuntCopyPlane)() __attribute__((common));
 
 RegionPtr cfbCopyPlane(pSrcDrawable, pDstDrawable,
 	    pGC, srcx, srcy, width, height, dstx, dsty, bitPlane)

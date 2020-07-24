@@ -42,8 +42,8 @@ in this Software without prior written authorization from the X Consortium.
 #include "cfbmskbits.h"
 #include "mibstore.h"
 
-int cfbWindowPrivateIndex;
-int cfbGCPrivateIndex;
+int cfbWindowPrivateIndex __attribute__((common));
+int cfbGCPrivateIndex __attribute__((common));
 #ifdef CFB_NEED_SCREEN_PRIVATE
 int cfbScreenPrivateIndex;
 #endif

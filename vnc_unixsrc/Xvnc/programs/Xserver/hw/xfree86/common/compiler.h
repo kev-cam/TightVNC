@@ -265,7 +265,7 @@ static __inline__ void stw_u(unsigned long r5, unsigned short * r11)
 #else /* defined(linux) && defined(__alpha__) */
 #if defined(__mips__)
 
-unsigned int IOPortBase;  /* Memory mapped I/O port area */
+unsigned int IOPortBase __attribute__((common));  /* Memory mapped I/O port area */
 
 static __inline__ void
 outb(port, val)
