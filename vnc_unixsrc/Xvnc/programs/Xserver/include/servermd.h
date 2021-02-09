@@ -538,6 +538,44 @@ SOFTWARE.
 #define LOG2_BYTES_PER_SCANLINE_PAD	2
 #endif
 
+/*
+ * override some of the above based on __BYTE_ORDER__ AND __SIZE_WIDTH__
+ */
+#undef IMAGE_BYTE_ORDER
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define IMAGE_BYTE_ORDER LSBFirst
+#define BITMAP_BIT_ORDER LSBFirst
+#else
+#define IMAGE_BYTE_ORDER MSBFirst
+#define BITMAP_BIT_ORDER MSBFirst
+#endif /* __BYTE_ORDER__ */
+
+#undef BITMAP_SCANLINE_UNIT
+#undef BITMAP_SCANLINE_PAD
+#undef LOG2_BITMAP_PAD
+#undef LOG2_BYTES_PER_SCANLINE_PAD
+#undef INTERNAL_VS_EXTERNAL_PADDING
+#undef BITMAP_SCANLINE_UNIT_PROTO
+#undef BITMAP_SCANLINE_PAD_PROTO
+#undef LOG2_BITMAP_PAD_PROTO
+#undef LOG2_BYTES_PER_SCANLINE_PAD_PROTO
+#if __SIZE_WIDTH__ == 64
+#define BITMAP_SCANLINE_UNIT 64
+#define BITMAP_SCANLINE_PAD 64
+#define LOG2_BITMAP_PAD 6
+#define LOG2_BYTES_PER_SCANLINE_PAD 3
+#define INTERNAL_VS_EXTERNAL_PADDING
+#define BITMAP_SCANLINE_UNIT_PROTO 32
+#define BITMAP_SCANLINE_PAD_PROTO 32
+#define LOG2_BITMAP_PAD_PROTO 5
+#define LOG2_BYTES_PER_SCANLINE_PAD_PROTO 2
+#else
+#define BITMAP_SCANLINE_UNIT 32
+#define BITMAP_SCANLINE_PAD 32
+#define LOG2_BITMAP_PAD 5
+#define LOG2_BYTES_PER_SCANLINE_PAD 2
+#endif /* __SIZE_WIDTH __ */
+
 /* 
  *   This returns the number of padding units, for depth d and width w.
  * For bitmaps this can be calculated with the macros above.

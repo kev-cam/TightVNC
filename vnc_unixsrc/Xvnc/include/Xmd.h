@@ -67,6 +67,13 @@ SOFTWARE.
 #define LONG64
 #endif
 #endif
+/*
+ * Configure by __SIZE_WIDTH__
+ */
+#undef LONG64
+#if __SIZE_WIDTH__ == 64
+#define LONG64
+#endif /* __SIZE_WIDTH__ */
 
 /*
  * Stuff to handle large architecture machines; the constants were generated
