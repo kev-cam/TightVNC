@@ -179,7 +179,7 @@ HandleBasicDesktopEvent(Widget w, XtPointer ptr, XEvent *ev, Boolean *cont)
   case LeaveNotify:
     for (i = 0; i < 256; i++) {
       if (modifierPressed[i]) {
-	SendKeyEvent(XKeycodeToKeysym(dpy, i, 0), False);
+	SendKeyEvent(XkbKeycodeToKeysym(dpy, i, 0, 0), False);
 	modifierPressed[i] = False;
       }
     }
@@ -312,7 +312,7 @@ SendRFBEvent(Widget w, XEvent *ev, String *params, Cardinal *num_params)
     XLookupString(&ev->xkey, keyname, 256, &ks, NULL);
 
     if (IsModifierKey(ks)) {
-      ks = XKeycodeToKeysym(dpy, ev->xkey.keycode, 0);
+      ks = XkbKeycodeToKeysym(dpy, ev->xkey.keycode, 0, 0);
       modifierPressed[ev->xkey.keycode] = (ev->type == KeyPress);
     }
 
