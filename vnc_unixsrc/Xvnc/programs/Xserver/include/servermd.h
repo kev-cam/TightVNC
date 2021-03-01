@@ -576,6 +576,14 @@ SOFTWARE.
 #define LOG2_BYTES_PER_SCANLINE_PAD 2
 #endif /* __SIZE_WIDTH __ */
 
+/*
+ * Make sure GLYPHPADBYTES and GETLEFTBITS_ALIGNMENT are always defined
+ */
+#undef GLYPHPADBYTES
+#define GLYPHPADBYTES 4
+#undef GETLEFTBITS_ALIGNMENT
+#define GETLEFTBITS_ALIGNMENT 1
+
 /* 
  *   This returns the number of padding units, for depth d and width w.
  * For bitmaps this can be calculated with the macros above.

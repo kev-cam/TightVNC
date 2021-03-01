@@ -100,7 +100,7 @@ SOFTWARE.
 #if defined(NOFILE) && !defined(NOFILES_MAX)
 #define OPEN_MAX NOFILE
 #else
-#ifndef __EMX__
+#if !defined(__EMX__) && defined(NOFILES_MAX)
 #define OPEN_MAX NOFILES_MAX
 #else
 #define OPEN_MAX 256
