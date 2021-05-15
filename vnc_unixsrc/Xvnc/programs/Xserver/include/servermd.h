@@ -407,8 +407,31 @@ SOFTWARE.
 
 #if defined (linux) && defined(__powerpc__)
 
+#ifdef __powerpc64__
+#  define BITMAP_SCANLINE_UNIT			64
+# define BITMAP_SCANLINE_PAD 			64
+# define LOG2_BITMAP_PAD			6
+# define LOG2_BYTES_PER_SCANLINE_PAD		3
+
+/* Add for handling protocol XPutImage and XGetImage; see comment in
+ * Alpha section.
+ */
+#define INTERNAL_VS_EXTERNAL_PADDING
+#define BITMAP_SCANLINE_UNIT_PROTO		32
+
+#define BITMAP_SCANLINE_PAD_PROTO 	 	32
+#define LOG2_BITMAP_PAD_PROTO			5
+#define LOG2_BYTES_PER_SCANLINE_PAD_PROTO	2
+#endif /* linux/ppc64 */
+
+#if defined(__LITTLE_ENDIAN__)
+#define IMAGE_BYTE_ORDER       LSBFirst
+#define BITMAP_BIT_ORDER       LSBFirst
+#else
 #define IMAGE_BYTE_ORDER       MSBFirst
 #define BITMAP_BIT_ORDER       MSBFirst
+#endif
+
 #define GLYPHPADBYTES          4
 #define GETLEFTBITS_ALIGNMENT  1
 
