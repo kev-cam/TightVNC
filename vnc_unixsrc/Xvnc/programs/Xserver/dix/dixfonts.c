@@ -1759,10 +1759,11 @@ SetFontPathElements(npaths, paths, bad)
 	    if (err != Successful) {
 		xfree(fpe->name);
 		xfree(fpe);
-		err = BadValue;
-		goto bail;
+		err = Successful;
 	    }
-	    fplist[valid_paths++] = fpe;
+	    else {
+	      fplist[valid_paths++] = fpe;
+            }
 	} else {
 	    err = BadValue;
 	    goto bail;

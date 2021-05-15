@@ -649,7 +649,7 @@ Unix domain socket for display number \fBn\fP
 /tmp/rcX\fBn\fP
 Kerberos 5 replay cache for display number \fBn\fP
 .TP 30
-/usr/adm/X\fBn\fPmsgs
+/var/log/X\fBn\fPmsgs
 Error log file for display number \fBn\fP if run from \fIinit(8)\fP
 .TP 30
 <XRoot>/lib/X11/xdm/xdm-errors

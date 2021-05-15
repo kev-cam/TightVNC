@@ -421,6 +421,20 @@ SOFTWARE.
 
 #endif /* Linux/PPC */
 
+#if defined (linux) && defined(__sparc__)
+
+#define IMAGE_BYTE_ORDER       MSBFirst
+#define BITMAP_BIT_ORDER       MSBFirst
+#define GLYPHPADBYTES          4
+#define GETLEFTBITS_ALIGNMENT  1
+
+#define AVOID_MEMORY_READ
+#define LARGE_INSTRUCTION_CACHE
+#define FAST_CONSTANT_OFFSET_MODE
+#define SHARED_IDCACHE
+
+#endif /* Linux/sparc */
+
 #if defined(__MACH__) && defined(__POWERPC__)
 
 #define IMAGE_BYTE_ORDER       MSBFirst

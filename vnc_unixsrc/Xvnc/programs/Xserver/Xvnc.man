@@ -141,7 +141,7 @@ network addresses. Probably, the best way to secure Xvnc server is to
 allow only loopback connections from the server machine (the
 \fI\-localhost\fR option) and to use SSH tunneling for remote access
 to the Xvnc server. For details on SSH tunneling, see
-<URL:http://www.uk.research.att.com/vnc/sshvnc.html> .
+<URL:http://www.cl.cam.ac.uk/Research/DTG/attarchive/vnc/sshvnc.html> .
 .SH SEE ALSO
 \fBvncserver\fR(1), \fBvncviewer\fR(1), \fBvncpasswd\fR(1),
 \fBvncconnect\fR(1), \fBsshd\fR(1)

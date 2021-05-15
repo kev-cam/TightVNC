@@ -3,7 +3,7 @@
 .\" Man page for vncserver
 .\"
 .\" Copyright (C) 1998 Marcus.Brinkmann@ruhr-uni-bochum.de
-.\" Copyright (C) 2000, opal@debian.org
+.\" Copyright (C) 2000,2008 Ola Lundqvist <opal@debian.org>
 .\" Copyright (C) 2000, 2001 Red Hat, Inc.
 .\" Copyright (C) 2001, 2002 Constantin Kaplinsky
 .\"
@@ -18,9 +18,10 @@ vncserver \- a wrapper to launch an X server for VNC.
 \fBvncserver\fR
 [:\fIdisplay\fR] [\-geometry \fIwidth\fRx\fIheight\fR] [\-depth \fIdepth\fR]
 [\-pixelformat rgb\fINNN\fR|bgr\fINNN\fR] [\-name \fIdesktop\-name\fR]
-[\fIXvnc\-options\fR...]
+[\| \-httpport\ int \|] [\| \-basehttpport\ int \|] [\| \-alwaysshared \|]
+[\| \-nevershared \|] [\fIXvnc\-options\fR...]
 .TP
-\fBvncserver\fR \-kill :\fIdisplay\fR
+\fBvncserver\fR [\| \-clean \|] \-kill :\fIdisplay\fR
 .TP
 \fBvncserver\fR \-help
 .SH DESCRIPTION
@@ -54,8 +55,26 @@ the viewer display.
 \fB\-name\fR \fIstring\fR
 This specifies the name of the desktop.
 .TP
+\fB\-clean\fR
+This option can be used in conjunction with
+.TP
 \fB\-kill\fR \fB:\fR\fIdisplay\fR
 Stops the session running on the specified display.
+.TP
+\fB\-nevershared\fR
+Never allow shared desktops.
+.TP
+\fB\-alwaysshared\fR
+Always allow shared desktops.
+.TP
+\fB\-basehttpport int\fR
+The base http port to use for the java client applet (you have to install
+the tightvnc-java package to make this work). The real port number will be
+port = base + display num.
+.TP
+\fB\-httpport int\fR
+The http port to use for the java client applet (you have to install
+the tightvnc-java package to make this work).
 .TP
 \fB\-help\fR
 Prints a short usage notice to stderr.
