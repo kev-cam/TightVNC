@@ -55,6 +55,11 @@ HandleZlibBPP (int rx, int ry, int rw, int rh)
     raw_buffer_size = (( rw * rh ) * ( BPP / 8 ));
     raw_buffer = (char*) malloc( raw_buffer_size );
 
+    if (raw_buffer == NULL) {
+
+       return False;
+
+    }
   }
 
   if (!ReadFromRFBServer((char *)&hdr, sz_rfbZlibHeader))
