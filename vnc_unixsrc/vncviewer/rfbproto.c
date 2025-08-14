@@ -886,6 +886,7 @@ SendKeyEvent(CARD32 key, Bool down)
 {
   rfbKeyEventMsg ke;
 
+  memset(&ke, 0, sizeof(ke));
   ke.type = rfbKeyEvent;
   ke.down = down ? 1 : 0;
   ke.key = Swap32IfLE(key);
@@ -906,6 +907,7 @@ SendClientCutText(char *str, int len)
     free(serverCutText);
   serverCutText = NULL;
 
+  memset(&cct, 0, sizeof(cct));
   cct.type = rfbClientCutText;
   cct.length = Swap32IfLE(len);
   return  (WriteExact(rfbsock, (char *)&cct, sz_rfbClientCutTextMsg) &&
