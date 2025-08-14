@@ -56,7 +56,7 @@ HandleCoRREBPP (int rx, int ry, int rw, int rh)
     XChangeGC(dpy, gc, GCForeground, &gcv);
     XFillRectangle(dpy, desktopWin, gc, rx, ry, rw, rh);
 
-    if (!ReadFromRFBServer(buffer, hdr.nSubrects * (4 + (BPP / 8))))
+    if (hdr.nSubrects > BUFFER_SIZE / (4 + (BPP / 8)) || !ReadFromRFBServer(buffer, hdr.nSubrects * (4 + (BPP / 8))))
 	return False;
 
     ptr = (CARD8 *)buffer;
