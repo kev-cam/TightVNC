@@ -1021,7 +1021,7 @@ HandleRFBServerMessage()
 	bytesPerLine = rect.r.w * myFormat.bitsPerPixel / 8;
 	linesToRead = BUFFER_SIZE / bytesPerLine;
 
-	while (rect.r.h > 0) {
+	while (linesToRead && rect.r.h > 0) {
 	  if (linesToRead > rect.r.h)
 	    linesToRead = rect.r.h;
 
