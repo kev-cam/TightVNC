@@ -1,0 +1,115 @@
+ifndef PIXELSIZE
+	$(error Makefile.cfb-common requires to be included properly by a cfg*/Makefile with PIXELSIZE being defined.)
+endif
+
+ifeq ($(PIXELSIZE),8)
+	PSZSRCS = cfb8bit.c cfbteblt8.c cfbglrop8.c cfbpush8.c cfbrctstp8.c cfb8cppl.c
+endif
+
+define link_source_file =
+$(1): ../cfb/$(1)
+	$$(LN) $$< $$@
+
+endef
+
+SRCS = cfbgc.c cfbrrop.c cfbwindow.c cfbpntwin.c cfbmskbits.c cfbpixmap.c cfbbitblt.c cfbfillsp.c cfbsetsp.c cfbscrinit.c cfballpriv.c cfbgetsp.c cfbfillrct.c cfbsolidC.c cfbsolidX.c cfbsolidG.c cfbtileoddC.c cfbtileoddG.c cfbtile32C.c cfbtile32G.c cfbcmap.c cfbzerarcC.c cfbzerarcX.c cfbzerarcG.c cfbfillarcC.c cfbfillarcG.c cfbigblt8.c cfbglblt8.c cfbtegblt.c cfbbstore.c cfbbltC.c cfbbltX.c cfbbltO.c cfbbltG.c cfbpolypnt.c cfbbres.c cfbline.c cfbhrzvert.c cfbbresd.c cfbimage.c cfbseg.c cfb8lineCO.c cfb8lineX.c cfb8lineG.c cfb8lineCP.c cfb8segC.c cfb8segX.c cfb8segG.c cfb8segCS.c cfbply1rctC.c cfbply1rctG.c $(PSZSRCS)
+OBJS = $(SRCS:.c=.o)
+INCS = -I. -I../cfb -I../mfb -I../mi -I../include -I../../../exports/include/X11 -I../../../include/fonts -I../hw/xfree86/common -I../../../exports/include
+DEFS += -DPSZ=$(PIXELSIZE) # -DXFREE86 # <- This only pulls in some assembler optimization for alpha and mips, the later conflicts at least with mips64el.
+
+all: libcfb.a
+
+libcfb.a: $(OBJS)
+	$(RM) $@
+	$(AR) cqs $@ $^
+
+cfbseg.o: cfbseg.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DPOLYSEGMENT -o $@ $<
+
+cfbfillarcC.o: cfbfillarcC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -o $@ $<
+
+cfbfillarcG.o: cfbfillarcG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXset -o $@ $<
+
+cfbzerarcC.o: cfbzerarcC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -o $@ $<
+
+cfbzerarcX.o: cfbzerarcX.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXxor -o $@ $<
+
+cfbzerarcG.o: cfbzerarcG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXset -o $@ $<
+
+cfbbltC.o: cfbbltC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=Mcopy -o $@ $<
+
+cfbbltX.o: cfbbltX.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=Mxor -o $@ $<
+
+cfbbltO.o: cfbbltO.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=Mor -o $@ $<
+
+cfbbltG.o: cfbbltG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=0 -o $@ $<
+
+cfbsolidC.o: cfbsolidC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -o $@ $<
+
+cfbsolidX.o: cfbsolidX.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXxor -o $@ $<
+
+cfbsolidG.o: cfbsolidG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXset -o $@ $<
+
+cfbtileoddC.o: cfbtileoddC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=Mcopy -o $@ $<
+
+cfbtileoddG.o: cfbtileoddG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=0 -o $@ $<
+
+cfbtile32C.o: cfbtile32C.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=Mcopy -o $@ $<
+
+cfbtile32G.o: cfbtile32G.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DMROP=0 -o $@ $<
+
+cfb8lineCO.o: cfb8lineCO.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -o $@ $<
+
+cfb8lineCP.o: cfb8lineCP.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -DPREVIOUS -o $@ $<
+
+cfb8lineX.o: cfb8lineX.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXxor -o $@ $<
+
+cfb8lineG.o: cfb8lineG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXset -o $@ $<
+
+cfb8segCS.o: cfb8segCS.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -DPOLYSEGMENT -DWIDTH_SHIFT -o $@ $<
+
+cfb8segC.o: cfb8segC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -DPOLYSEGMENT -o $@ $<
+
+cfb8segX.o: cfb8segX.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXxor -DPOLYSEGMENT -o $@ $<
+
+cfb8segG.o: cfb8segG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXset -DPOLYSEGMENT -o $@ $<
+
+cfbply1rctC.o: cfbply1rctC.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXcopy -o $@ $<
+
+cfbply1rctG.o: cfbply1rctG.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DRROP=GXset -o $@ $<
+
+cfbglrop8.o: cfbglrop8.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -DGLYPHROP -o $@ $<
+
+%.o: %.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(INCS) $(DEFS) -o $@ $<
+
+install:
+
+.PHONY: all clean install
