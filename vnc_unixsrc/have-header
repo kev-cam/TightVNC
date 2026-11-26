@@ -1,0 +1,9 @@
+#!/bin/sh
+# have-header HEADER...
+#
+# Succeeds, saying nothing, if the C compiler finds every one of these
+# headers.  The Makefile uses it to say what is missing before a build
+# stops on it.  CC, CPPFLAGS and CFLAGS come from the environment.
+for h in "$@"; do
+    printf '#include <%s>\n' "$h"
+done | ${CC:-cc} $CPPFLAGS $CFLAGS -E -x c - >/dev/null 2>&1

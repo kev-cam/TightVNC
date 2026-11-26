@@ -25,18 +25,25 @@ peers and the tests an import has to pass.
 
 ## Building
 
-The X server needs a C compiler, zlib and libjpeg (`zlib1g-dev`,
-`libjpeg-dev`), nothing else:
+The X server needs a C compiler, zlib and libjpeg, nothing else:
 
 ```
+sudo apt install libjpeg-dev zlib1g-dev
 cd vnc_unixsrc
 smak server            # or: make server
 ```
 
 gives `Xvnc/programs/Xserver/Xvnc` (Debian installs it as `Xtightvnc`).
-`smak` with no target builds everything; the viewer also needs the X
-toolkit libraries (`libxaw7-dev libxmu-dev libxt-dev libxi-dev libx11-dev
-libxext-dev`).
+
+`smak` with no target builds everything the machine has the headers for
+and says what it left out: `vncviewer` wants the X toolkit and `vncconnect`
+Xlib, which a machine that only runs the server may not have.
+
+```
+sudo apt install libx11-dev libxext-dev libxt-dev libxaw7-dev libxmu-dev
+```
+
+Without zlib's or libjpeg's headers the build stops at once and says so.
 
 The compiler is told `-std=gnu90` unless `CFLAGS` is set: gcc 14 and later
 take this code as nothing newer. Build from `vnc_unixsrc` or
