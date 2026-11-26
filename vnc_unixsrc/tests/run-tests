@@ -93,7 +93,10 @@ class Server:
         self.display = free_display()
         self.rfb_port = free_port()
         self.xpra_port = free_port()
-        self.socket = os.path.join(workdir, "xpra.sock")
+        # a unix socket's path has to fit in 107 bytes, which the test's own
+        # directory may not leave room for (a checkout deep in a cache)
+        self.sockdir = tempfile.mkdtemp(prefix="tvnc-")
+        self.socket = os.path.join(self.sockdir, "xpra.sock")
         self.auth = os.path.join(workdir, "Xauthority")
         self.log = os.path.join(workdir, "xvnc.log")
         self.apps = []
@@ -199,6 +202,7 @@ class Server:
                 except OSError:
                     pass
         self.logfile.close()
+        shutil.rmtree(self.sockdir, ignore_errors=True)
         if self.verbose:
             sys.stdout.write(self.tail(200))
 
