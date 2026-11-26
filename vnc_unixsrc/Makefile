@@ -13,4 +13,8 @@ vncviewer vncpasswd Xvnc: libvncauth
 $(SUBDIRS):
 	$(MAKE) -C $@ $(MAKECMDGOALS)
 
-.PHONY: all clean install list_defines $(SUBDIRS)
+# the tests of the server that has been built (tests/run-tests)
+check:
+	$(MAKE) -C tests check
+
+.PHONY: all clean install check list_defines $(SUBDIRS)

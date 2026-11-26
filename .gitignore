@@ -63,3 +63,4 @@
 /vnc_unixsrc/Xvnc/programs/Xserver/mfb/mfbtewhite.c
 /vnc_unixsrc/Xvnc/programs/Xserver/mfb/mfbtileC.c
 /vnc_unixsrc/Xvnc/programs/Xserver/mfb/mfbtileG.c
+__pycache__/

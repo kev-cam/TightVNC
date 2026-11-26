@@ -1,0 +1,857 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 D. Kevin Cameron
+"""Tests of Xvnc: the server is started on a display of its own, X programs
+are run on it, and it is driven over both of its protocols.
+
+    run-tests [options] [name...]
+
+    --xvnc PATH       the server to test (default: the one built in this tree)
+    --failures FILE   write the names of the failed tests there, one a line;
+                      the exit status is then 0 if the tests could be run
+    --list            list the tests
+    --keep            keep each test's directory (logs) under tests/out
+    -v                show what the servers print
+
+A test that needs a program this machine lacks (xterm, xclock, xmessage,
+xwininfo, a window manager, xpra) is skipped, which is not a failure.
+"""
+
+import os
+import random
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from xpraproto import XpraClient, Closed, rfb_grab, compare, rencode, lz4_store  # noqa: E402
+
+TOP = os.path.dirname(HERE)
+DEFAULT_XVNC = os.path.join(TOP, "Xvnc", "programs", "Xserver", "Xvnc")
+WIRE_SRC = os.path.join(TOP, "Xvnc", "programs", "Xserver", "hw", "vnc")
+
+FONT_DIRS = [
+    "/usr/share/fonts/X11/misc", "/usr/share/fonts/X11/75dpi", "/usr/share/fonts/X11/100dpi",
+    "/usr/share/X11/fonts/misc", "/usr/X11R6/lib/X11/fonts/misc", "/usr/lib/X11/fonts/misc",
+]
+RGB_FILES = ["/usr/share/X11/rgb", "/etc/X11/rgb", "/usr/X11R6/lib/X11/rgb", "/usr/lib/X11/rgb"]
+
+
+class Skip(Exception):
+    pass
+
+
+def need(*programs):
+    for p in programs:
+        if not shutil.which(p):
+            raise Skip("%s is not installed" % p)
+
+
+def expect(cond, what):
+    if not cond:
+        raise AssertionError(what)
+
+
+def wait_for(cond, seconds, step=0.05):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        v = cond()
+        if v:
+            return v
+        time.sleep(step)
+    return cond()
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def free_display():
+    for n in random.sample(range(100, 400), 300):
+        if not os.path.exists("/tmp/.X11-unix/X%d" % n) and not os.path.exists("/tmp/.X%d-lock" % n):
+            return n
+    raise RuntimeError("no free display number")
+
+
+class Server:
+    """An Xvnc on a display of its own, and the programs run on it."""
+
+    def __init__(self, xvnc, workdir, geometry="1400x1000", verbose=False, args=()):
+        self.dir = workdir
+        self.display = free_display()
+        self.rfb_port = free_port()
+        self.xpra_port = free_port()
+        self.socket = os.path.join(workdir, "xpra.sock")
+        self.auth = os.path.join(workdir, "Xauthority")
+        self.log = os.path.join(workdir, "xvnc.log")
+        self.apps = []
+        # one cookie, for any display (family "wild", no address, no number)
+        with open(self.auth, "wb") as f:
+            name = b"MIT-MAGIC-COOKIE-1"
+            f.write(struct.pack("!HHH", 0xffff, 0, 0) + struct.pack("!H", len(name)) + name +
+                    struct.pack("!H", 16) + os.urandom(16))
+        os.chmod(self.auth, 0o600)
+        fonts = ",".join(d + "/" for d in FONT_DIRS if os.path.isdir(d))
+        if not fonts:
+            raise Skip("no X fonts found (xfonts-base)")
+        rgb = next((r for r in RGB_FILES if os.path.exists(r + ".txt")), None)
+        cmd = [xvnc, ":%d" % self.display, "-auth", self.auth, "-nolisten", "tcp", "-localhost",
+               "-geometry", geometry, "-depth", "24", "-rfbport", str(self.rfb_port),
+               "-desktop", "tightvnc tests", "-fp", fonts,
+               "-xprasocket", self.socket, "-xpraport", str(self.xpra_port)]
+        if rgb:
+            cmd += ["-co", rgb]
+        cmd += list(args)
+        self.logfile = open(self.log, "wb")
+        self.proc = subprocess.Popen(cmd, stdout=self.logfile, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, cwd=workdir)
+        self.verbose = verbose
+        if not wait_for(lambda: os.path.exists(self.socket) and
+                        os.path.exists("/tmp/.X11-unix/X%d" % self.display) or
+                        self.proc.poll() is not None, 10):
+            raise AssertionError("the server did not start: " + self.tail())
+        if self.proc.poll() is not None:
+            raise AssertionError("the server exited at once: " + self.tail())
+
+    def env(self):
+        e = dict(os.environ)
+        e["DISPLAY"] = ":%d" % self.display
+        e["XAUTHORITY"] = self.auth
+        e.pop("WAYLAND_DISPLAY", None)
+        return e
+
+    def run(self, *argv, **kw):
+        p = subprocess.Popen(list(argv), env=self.env(), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             cwd=self.dir, start_new_session=True, **kw)
+        self.apps.append(p)
+        return p
+
+    def output(self, *argv):
+        return subprocess.run(list(argv), env=self.env(), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=20).stdout
+
+    def geometry(self, xid):
+        """(x, y, w, h) of a window's inside, on the screen; None without xwininfo."""
+        if not shutil.which("xwininfo"):
+            return None
+        vals = {}
+        for line in self.output("xwininfo", "-id", str(xid)).splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                vals[k.strip()] = v.strip()
+        try:
+            # xwininfo's corner is the border's: the inside starts a border in
+            bw = int(vals.get("Border width", "0"))
+            return (int(vals["Absolute upper-left X"]) + bw, int(vals["Absolute upper-left Y"]) + bw,
+                    int(vals["Width"]), int(vals["Height"]))
+        except (KeyError, ValueError):
+            return None
+
+    def alive(self):
+        return self.proc.poll() is None
+
+    def tail(self, n=15):
+        if not self.logfile.closed:
+            self.logfile.flush()
+        try:
+            with open(self.log, "r", errors="replace") as f:
+                return "".join(f.readlines()[-n:])
+        except OSError:
+            return ""
+
+    def client(self, tcp=False, **kw):
+        return XpraClient(("127.0.0.1", self.xpra_port) if tcp else self.socket, **kw)
+
+    def stop(self):
+        for p in self.apps:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        for p in self.apps:
+            try:
+                p.wait(2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        self.logfile.close()
+        if self.verbose:
+            sys.stdout.write(self.tail(200))
+
+
+def pixels_agree(srv, client, wins=None, tries=4):
+    """The windows as the Xpra client has them are what RFB says is on the
+    screen, at the place the X server has each window."""
+    last = None
+    for _ in range(tries):
+        client.settle()
+        fb = rfb_grab(srv.rfb_port)
+        client.settle(quiet=0.2)
+        last = []
+        for win in (wins if wins is not None else list(client.windows.values())):
+            if win.wid not in client.windows:
+                continue
+            geo = srv.geometry(win.metadata.get("xid", 0))
+            origin = (geo[0], geo[1]) if geo else None
+            if geo and (geo[2], geo[3]) != (win.w, win.h):
+                last.append("%r: the server has it at %dx%d" % (win, geo[2], geo[3]))
+                continue
+            bad = compare(win, fb, origin)
+            if bad:
+                last.append("%r: differs from the screen at %s%s" % (
+                    win, bad[:4], " and more" if len(bad) > 4 else ""))
+        if not last:
+            return
+        time.sleep(0.3)
+    raise AssertionError("; ".join(last))
+
+
+# ---------------------------------------------------------------------------
+# the tests: each takes a function that starts a server
+
+
+def test_wire_format(start, ctx):
+    """xpra_wire.c on its own: known answers, round trips, damaged input"""
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        raise Skip("no C compiler")
+    exe = os.path.join(ctx.dir, "wire_test")
+    base = [cc, "-std=gnu90", "-Wall", "-g", "-O1", "-I" + WIRE_SRC, "-o", exe,
+            os.path.join(HERE, "wire_test.c"), os.path.join(WIRE_SRC, "xpra_wire.c")]
+    san = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
+    r = subprocess.run(base[:1] + san + base[1:], capture_output=True, text=True)
+    if r.returncode:
+        # a compiler without the sanitizers: the tests still run
+        r = subprocess.run(base, capture_output=True, text=True)
+    expect(r.returncode == 0, "wire_test does not compile: " + r.stderr[-800:])
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+    expect(r.returncode == 0, "wire_test: " + (r.stdout + r.stderr)[-800:])
+
+
+def test_query(start, ctx):
+    """a hello with a request ("xpra version") is answered and the connection closed"""
+    srv = start()
+    for tcp in (False, True):
+        c = srv.client(tcp=tcp)
+        c.hello(request="version")
+        c.pump(5, lambda c: c.closed)
+        expect(c.server is not None, "no hello came back")
+        expect(str(c.server.get("version", "")).startswith("6."), "version: %r" % c.server.get("version"))
+        expect(c.closed, "the server kept the connection open")
+        expect(not c.windows, "a query was sent windows")
+    mode = os.stat(srv.socket).st_mode
+    expect(mode & 0o077 == 0, "the socket is open to others: mode %o" % (mode & 0o777))
+
+
+def test_windows(start, ctx):
+    """every top level window is announced, with its title, class and size"""
+    need("xclock", "xterm")
+    srv = start()
+    srv.run("xclock", "-geometry", "200x200+50+50", "-name", "tclock")
+    srv.run("xterm", "-geometry", "80x24+400+300", "-T", "a terminal", "-e", "sleep", "60")
+    time.sleep(1.0)
+    c = srv.client()
+    c.attach()
+    clock, term = c.find(cls="XClock"), c.find(cls="XTerm")
+    expect(clock and term, "windows: %r" % list(c.windows.values()))
+    expect(len(c.windows) == 2, "windows: %r" % list(c.windows.values()))
+    expect((clock.w, clock.h) == (200, 200), "xclock is %dx%d" % (clock.w, clock.h))
+    expect(term.title() == "a terminal", "title: %r" % term.title())
+    expect(clock.metadata.get("class-instance") == ["tclock", "XClock"],
+           "class: %r" % clock.metadata.get("class-instance"))
+    expect(clock.metadata.get("window-type") == ["NORMAL"], "type: %r" % clock.metadata.get("window-type"))
+    expect(clock.metadata.get("client-machine"), "no client-machine")
+    expect("increment" in term.metadata.get("size-constraints", {}), "xterm's size hints are missing")
+    expect(not clock.override_redirect, "xclock announced as a popup")
+    expect(c.server.get("session_name") == "tightvnc tests", "session name: %r" % c.server.get("session_name"))
+
+
+def test_pixels(start, ctx):
+    """what the client is sent is what is on the screen"""
+    need("xclock", "xterm")
+    srv = start()
+    srv.run("xclock", "-geometry", "200x200+50+50")
+    srv.run("xterm", "-geometry", "80x24+400+300", "-e", "sh", "-c", "ls -la /; sleep 60")
+    time.sleep(1.0)
+    c = srv.client()
+    c.attach()
+    expect(len(c.windows) == 2, "windows: %r" % list(c.windows.values()))
+    pixels_agree(srv, c)
+
+
+def test_placement(start, ctx):
+    """without a window manager, windows that overlap are moved apart"""
+    need("xclock", "xterm", "xwininfo")
+    srv = start()
+    srv.run("xterm", "-geometry", "80x24+40+40", "-e", "sleep", "60")
+    srv.run("xclock", "-geometry", "200x200+100+100")
+    srv.run("xterm", "-geometry", "60x10+60+60", "-e", "sleep", "60")
+    # one that hangs off the screen
+    srv.run("xclock", "-geometry", "150x150+1350+950")
+    time.sleep(1.2)
+    c = srv.client()
+    c.attach()
+    expect(len(c.windows) == 4, "windows: %r" % list(c.windows.values()))
+    boxes = []
+    for win in c.windows.values():
+        geo = srv.geometry(win.metadata["xid"])
+        expect(geo, "no geometry for %r" % win)
+        x, y, w, h = geo
+        expect(x >= 0 and y >= 0 and x + w <= 1400 and y + h <= 1000, "%r is off the screen: %r" % (win, geo))
+        boxes.append((win, x, y, x + w, y + h))
+    for i, (wa, ax1, ay1, ax2, ay2) in enumerate(boxes):
+        for wb, bx1, by1, bx2, by2 in boxes[i + 1:]:
+            expect(not (ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1),
+                   "%r and %r overlap" % (wa, wb))
+    pixels_agree(srv, c)
+
+
+def test_typing(start, ctx):
+    """keys typed in a window reach the program in it"""
+    need("xterm")
+    srv = start()
+    out = os.path.join(ctx.dir, "typed.txt")
+    app = srv.run("xterm", "-e", "sh", "-c", "cat > '%s'" % out)
+    c = srv.client()
+    c.attach()
+    win = wait_for(lambda: c.pump(0.2) and c.find(cls="XTerm"), 5)
+    expect(win, "no xterm window")
+    c.focus(win)
+    c.pointer(win, 50, 50)
+    text = "hello xpra 123\n"
+    c.type(win, text)
+    # with the shift key, as a client sends capitals
+    c.key(win, 0xffe1, True, "Shift_L")
+    c.key(win, ord("A"), True, "A")
+    c.key(win, ord("A"), False, "A")
+    c.key(win, 0xffe1, False, "Shift_L")
+    c.type(win, "\n\x04")
+    wait_for(lambda: c.pump(0.2) and app.poll() is not None, 8)
+    expect(app.poll() is not None, "xterm did not exit on control-d")
+    got = open(out).read()
+    expect(got == text + "A\n", "typed %r, the program got %r" % (text + "A\n", got))
+    expect(c.find(cls="XTerm") is None, "the closed window was not taken back")
+
+
+def test_click(start, ctx):
+    """a click in a window reaches the button under it"""
+    need("xmessage", "xwininfo")
+    srv = start()
+    app = srv.run("xmessage", "-buttons", "first:11,second:12", "pick one")
+    c = srv.client()
+    c.attach()
+    win = wait_for(lambda: c.pump(0.2) and c.find(cls="Xmessage"), 5)
+    expect(win, "no xmessage window")
+    # the buttons are child windows: find the second one
+    tree = srv.output("xwininfo", "-id", str(win.metadata["xid"]), "-tree")
+    kids = []
+    for line in tree.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("0x") and "+" in parts[-1] and "x" in parts[-2]:
+            size, _, rest = parts[-2].partition("+")
+            w, h = (int(v) for v in size.split("x"))
+            ax, ay = (int(v) for v in parts[-1].lstrip("+").split("+"))
+            kids.append((w, h, ax, ay))
+    geo = srv.geometry(win.metadata["xid"])
+    buttons = sorted((k for k in kids if 10 < k[0] < 120 and 10 < k[1] < 40 and k[3] > geo[1] + 20),
+                     key=lambda k: k[2])
+    expect(len(buttons) >= 2, "could not find the buttons in:\n" + tree)
+    w, h, ax, ay = buttons[1]
+    c.click(win, ax - geo[0] + w // 2, ay - geo[1] + h // 2)
+    wait_for(lambda: c.pump(0.2) and app.poll() is not None, 6)
+    expect(app.poll() == 12, "xmessage exit status %r, not that of the second button" % app.poll())
+
+
+def test_popup(start, ctx):
+    """a menu is a window of its own, placed against the window it belongs to"""
+    need("xterm", "xwininfo")
+    srv = start()
+    srv.run("xterm", "-geometry", "80x24+300+200", "-e", "sleep", "60")
+    c = srv.client()
+    c.attach()
+    win = wait_for(lambda: c.pump(0.2) and c.find(cls="XTerm"), 5)
+    expect(win, "no xterm window")
+    c.focus(win)
+    c.pointer(win, 200, 100)
+    c.key(win, 0xffe3, True, "Control_L")
+    c.button(win, 1, True, 200, 100)
+    menu = wait_for(lambda: c.pump(0.2) and c.find(popup=True), 5)
+    expect(menu, "no menu appeared")
+    c.settle()
+    meta = menu.metadata
+    expect(meta.get("parent") == win.wid, "the menu's parent is %r, not the xterm" % meta.get("parent"))
+    geo, pgeo = srv.geometry(meta["xid"]), srv.geometry(win.metadata["xid"])
+    expect(meta.get("relative-position") == [geo[0] - pgeo[0], geo[1] - pgeo[1]],
+           "relative position %r, on the screen it is %r" % (meta.get("relative-position"),
+                                                             [geo[0] - pgeo[0], geo[1] - pgeo[1]]))
+    # this client has the xterm where the server has it, so the menu too
+    expect((menu.x, menu.y) == (geo[0], geo[1]), "menu sent to %r, it is at %r" % ((menu.x, menu.y), geo[:2]))
+    # the menu lies over the xterm: only the menu can be compared for now
+    pixels_agree(srv, c, [menu])
+    c.button(win, 1, False, 20, 20)
+    c.key(win, 0xffe3, False, "Control_L")
+    wait_for(lambda: c.pump(0.2) and c.find(popup=True) is None, 5)
+    expect(c.find(popup=True) is None, "the menu stayed after the button was released")
+    # what the menu covered has been repainted, and sent
+    pixels_agree(srv, c)
+
+
+def test_popup_follows_client(start, ctx):
+    """a client that has moved a window gets its menus where it has the window"""
+    need("xterm", "xwininfo")
+    srv = start()
+    srv.run("xterm", "-geometry", "80x24+300+200", "-e", "sleep", "60")
+    c = srv.client(automap=False)
+    c.attach()
+    win = c.find(cls="XTerm")
+    expect(win, "no xterm window")
+    c.map_window(win, 1000, 700)        # where this client shows it
+    c.settle()
+    c.pointer(win, 200, 100)
+    c.key(win, 0xffe3, True, "Control_L")
+    c.button(win, 1, True, 200, 100)
+    menu = wait_for(lambda: c.pump(0.2) and c.find(popup=True), 5)
+    expect(menu, "no menu appeared")
+    geo, pgeo = srv.geometry(menu.metadata["xid"]), srv.geometry(win.metadata["xid"])
+    want = (1000 + geo[0] - pgeo[0], 700 + geo[1] - pgeo[1])
+    expect((menu.x, menu.y) == want, "menu sent to %r, should be %r" % ((menu.x, menu.y), want))
+    c.button(win, 1, False, 20, 20)
+    c.key(win, 0xffe3, False, "Control_L")
+
+
+def test_resize(start, ctx):
+    """a window resized by the client is resized on the server, and redrawn"""
+    need("xterm", "xwininfo")
+    srv = start()
+    srv.run("xterm", "-geometry", "80x24+100+100", "-e", "sh", "-c", "ls -la /usr; sleep 60")
+    c = srv.client()
+    c.attach()
+    win = c.find(cls="XTerm")
+    expect(win, "no xterm window")
+    # a whole number of character cells more: the xterm takes it as it is
+    w, h = win.w + 120, win.h + 78
+    c.configure(win, 0, 0, w, h)
+    win.resize(w, h)
+    wait_for(lambda: c.pump(0.2) and srv.geometry(win.metadata["xid"])[2:] == (w, h), 5)
+    expect(srv.geometry(win.metadata["xid"])[2:] == (w, h),
+           "asked for %dx%d, the server has %r" % (w, h, srv.geometry(win.metadata["xid"])[2:]))
+    pixels_agree(srv, c)
+    # not a whole number of cells: the client is told the size it got
+    c.configure(win, 0, 0, w + 5, h + 5)
+    win.resize(w + 5, h + 5)
+    wait_for(lambda: c.pump(0.2) and any(p[0] == "window-resized" for p in c.packets), 5)
+    geo = srv.geometry(win.metadata["xid"])
+    expect((win.w, win.h) == (geo[2], geo[3]),
+           "the client was left at %dx%d, the window is %dx%d" % (win.w, win.h, geo[2], geo[3]))
+    pixels_agree(srv, c)
+
+
+def test_close(start, ctx):
+    """closing a window asks its program to close it"""
+    need("xclock")
+    srv = start()
+    app = srv.run("xclock")
+    c = srv.client()
+    c.attach()
+    win = wait_for(lambda: c.pump(0.2) and c.find(cls="XClock"), 5)
+    expect(win, "no xclock window")
+    c.send("close-window", win.wid)
+    wait_for(lambda: c.pump(0.2) and app.poll() is not None, 6)
+    expect(app.poll() is not None, "xclock is still running")
+    wait_for(lambda: c.pump(0.2) and not c.windows, 4)
+    expect(not c.windows, "the window was not taken back")
+
+
+def test_come_and_go(start, ctx):
+    """windows that appear and disappear while a client is attached"""
+    need("xclock", "xterm")
+    srv = start()
+    keep = srv.run("xterm", "-e", "sleep", "60")        # so the server does not reset
+    c = srv.client()
+    c.attach()
+    expect(len(c.windows) == 1, "windows: %r" % list(c.windows.values()))
+    app = srv.run("xclock")
+    expect(wait_for(lambda: c.pump(0.2) and c.find(cls="XClock"), 6), "the new window was not announced")
+    pixels_agree(srv, c)
+    os.killpg(app.pid, signal.SIGTERM)
+    wait_for(lambda: c.pump(0.2) and c.find(cls="XClock") is None, 6)
+    expect(c.find(cls="XClock") is None, "the window that went was not taken back")
+    expect(c.find(cls="XTerm"), "the other window went too")
+    expect(keep.poll() is None, "the xterm died")
+
+
+def test_output_stress(start, ctx):
+    """fast output and scrolling: nothing is lost on the way to the client"""
+    need("xterm")
+    srv = start()
+    script = ("import random, sys, time\n"
+              "random.seed(%d)\n"
+              "for i in range(400):\n"
+              "    sys.stdout.write('line %%d %%s\\n' %% (i, 'x' * random.randrange(60)))\n"
+              "    sys.stdout.flush()\n"
+              "    if random.random() < 0.3: time.sleep(random.random() * 0.02)\n"
+              "time.sleep(60)\n")
+    for round_ in range(3):
+        app = srv.run("xterm", "-geometry", "80x24+%d+%d" % (50 + 30 * round_, 50),
+                      "-e", sys.executable, "-c", script % round_)
+        c = srv.client()
+        c.attach()
+        expect(wait_for(lambda: c.pump(0.2) and c.find(cls="XTerm"), 5), "no xterm window")
+        time.sleep(1.5)
+        pixels_agree(srv, c)
+        c.close()
+        os.killpg(app.pid, signal.SIGTERM)
+        app.wait(5)
+        time.sleep(0.3)
+
+
+def test_takeover(start, ctx):
+    """a second client takes the windows over from the first"""
+    need("xclock")
+    srv = start()
+    srv.run("xclock")
+    time.sleep(0.8)
+    a = srv.client()
+    a.attach()
+    expect(len(a.windows) == 1, "first client: %r" % list(a.windows.values()))
+    b = srv.client(tcp=True)
+    b.attach()
+    expect(len(b.windows) == 1, "second client: %r" % list(b.windows.values()))
+    a.pump(3, lambda c: c.closed)
+    expect(a.disconnected, "the first client was not told why it was dropped")
+    expect(a.closed, "the first client was not dropped")
+    pixels_agree(srv, b)
+
+
+def test_bad_input(start, ctx):
+    """nothing a client sends stops the server"""
+    need("xclock")
+    srv = start()
+    srv.run("xclock")
+    time.sleep(0.8)
+    rnd = random.Random(1)
+
+    def blast(data, hello=False):
+        c = srv.client(tcp=rnd.random() < 0.5)
+        try:
+            if hello:
+                c.attach()
+            c.send_bytes(data)
+            c.pump(0.15)
+        except (Closed, OSError, AssertionError, ValueError):
+            pass
+        c.close()
+        expect(srv.alive(), "the server died of %r...: %s" % (data[:40], srv.tail()))
+
+    def frame(payload, flags=0x10, level=0, index=0, size=None):
+        return struct.pack("!BBBBL", 80, flags, level, index, len(payload) if size is None else size) + payload
+
+    blast(b"GET / HTTP/1.0\r\n\r\n")
+    blast(b"RFB 003.008\n")
+    blast(os.urandom(4096))
+    blast(frame(b"", size=0xffffffff))
+    blast(frame(b"x" * 100, size=50 * 1024 * 1024))
+    blast(frame(rencode(["hello", {}]), flags=0x12))          # "encrypted"
+    blast(frame(rencode(["hello", {}]), flags=0x04))          # yaml
+    blast(frame(rencode(["hello", {}]), level=0x41))          # brotli
+    blast(frame(b"\xff" * 64, level=0x11))                    # not lz4
+    blast(frame(struct.pack("<I", 0x7fffffff) + b"\x00", level=0x11))
+    blast(frame(lz4_store(rencode(["hello", {}]))[:-3], level=0x11))
+    blast(frame(rencode("hello")))                            # not a list
+    blast(frame(rencode([])))
+    blast(frame(rencode([5, 6])))
+    blast(frame(rencode(["hello"])))
+    blast(frame(rencode(["hello", "caps"])))
+    blast(frame(b"\xc1" * 200))                               # nested too deep
+    blast(frame(b"\x3b" * 3))                                 # lists never closed
+    for i in range(1, 16):                                    # raw chunks and nothing else
+        blast(b"".join(frame(b"z" * 10, index=i) for _ in range(3)))
+    blast(frame(b"z", index=200))
+    blast(frame(rencode(["hello", {"compressors": 7, "encoders": "x", "lz4": [1], "rencodeplus": None,
+                                   "request": ["a"]}])))
+    for _ in range(40):
+        good = bytearray(frame(lz4_store(rencode(["hello", {"version": "6.5", "rencodeplus": True,
+                                                              "compressors": ["lz4"]}])), level=0x11))
+        for _ in range(rnd.randrange(1, 5)):
+            good[rnd.randrange(len(good))] = rnd.randrange(256)
+        blast(bytes(good))
+
+    # and from a client that is attached: every packet with the wrong things in it
+    junk = [None, True, -1, 0, 7, 2 ** 40, -2 ** 40, 1.5, "", "x" * 300, b"\x00\xff", [], [1, 2],
+            ["a", "b", "c", "d"], [-5, -5, 100000, 100000], {}, {"a": [1]}, [[[[[]]]]]]
+    types = ["hello", "ping", "ping_echo", "damage-sequence", "pointer", "pointer-button",
+             "pointer-position", "button-action", "key-action", "focus", "map-window",
+             "configure-window", "unmap-window", "close-window", "buffer-refresh", "disconnect",
+             "connection-lost", "shutdown-server", "exit-server", "desktop_size", "set_deflate",
+             "keymap-changed", "clipboard-token", "info-request", "wheel-motion", "no-such-packet", ""]
+    for t in types:
+        data = b""
+        for _ in range(12):
+            wid = rnd.choice([1, 1, 1, 2, 0, -1, 99999])
+            args = [rnd.choice(junk + [wid]) for _ in range(rnd.randrange(0, 14))]
+            if rnd.random() < 0.6:
+                args[:0] = [wid]
+            data += frame(rencode([t] + args))
+        blast(data, hello=True)
+    # sizes and places no window should take
+    c = srv.client()
+    c.attach()
+    win = c.find(cls="XClock")
+    expect(win, "after all that, no xclock window: %s" % srv.tail())
+    for w, h in ((0, 0), (-10, 5), (70000, 70000), (1, 1), (2 ** 33, 3), (200, 200)):
+        c.configure(win, -30000, 40000, w, h)
+        c.send("map-window", win.wid, 0, 0, w, h, {}, {})
+        c.pointer(win, w, h)
+        c.pointer(win, -w - 1, -99999)
+    c.send("pointer", 0, 0, win.wid, [1, 2, 3], {})
+    c.send("pointer", 0, 0, win.wid, [], {})
+    c.send("key-action", win.wid, "x", True, [], 0x7fffffff, "", 0, 0)
+    c.send("key-action", win.wid, "x", True, [], -4, "", 0, 0)
+    c.send("draw", win.wid, 0, 0, 1, 1, "rgb24", b"1234", 1, 4, {}, chunk=7)
+    c.settle()
+    expect(srv.alive(), "the server died: " + srv.tail())
+    c.close()
+
+    # the server is still good for what it is for
+    c = srv.client()
+    c.attach()
+    expect(c.find(cls="XClock"), "no xclock window at the end: %s" % srv.tail())
+    c.configure(c.find(cls="XClock"), 0, 0, 200, 200)
+    c.find(cls="XClock").resize(200, 200)
+    pixels_agree(srv, c)
+
+
+def test_server_reset(start, ctx):
+    """when the last X program exits the X server resets: clients stay"""
+    need("xclock", "xterm")
+    srv = start()
+    app = srv.run("xclock")
+    c = srv.client()
+    c.attach()
+    expect(wait_for(lambda: c.pump(0.2) and c.find(cls="XClock"), 5), "no xclock window")
+    os.killpg(app.pid, signal.SIGTERM)
+    wait_for(lambda: c.pump(0.2) and not c.windows, 6)
+    expect(not c.windows, "the window was not taken back")
+    time.sleep(1.0)                     # the reset
+    expect(srv.alive(), "the server died at its reset: " + srv.tail())
+    srv.run("xterm", "-e", "sh", "-c", "echo after the reset; sleep 60")
+    expect(wait_for(lambda: c.pump(0.2) and c.find(cls="XTerm"), 6),
+           "nothing announced after the reset: " + srv.tail())
+    expect(not c.closed, "the client was dropped at the reset")
+    pixels_agree(srv, c)
+    # and once more, with the client gone in between
+    c.close()
+    for p in srv.apps:
+        if p.poll() is None:
+            os.killpg(p.pid, signal.SIGTERM)
+    time.sleep(1.5)
+    expect(srv.alive(), "the server died at its second reset: " + srv.tail())
+    srv.run("xclock")
+    time.sleep(0.8)
+    c = srv.client()
+    c.attach()
+    expect(c.find(cls="XClock"), "no window after the second reset")
+    pixels_agree(srv, c)
+
+
+WINDOW_MANAGERS = (
+    ("twm",), ("fvwm",), ("fvwm3",), ("icewm",), ("openbox",), ("fluxbox",), ("jwm",),
+    ("marco", "--sm-disable", "--no-composite"), ("metacity", "--sm-disable", "--no-composite"),
+    ("xfwm4", "--compositor=off", "--sm-client-disable"),
+)
+
+
+def test_window_manager(start, ctx):
+    """under a window manager the application's window is shared, not the frame"""
+    need("xterm", "xwininfo")
+    srv = start()
+    wm = None
+    for cmd in WINDOW_MANAGERS:
+        if not shutil.which(cmd[0]):
+            continue
+        p = srv.run(*cmd)
+        time.sleep(1.5)
+        if p.poll() is None:
+            wm = cmd[0]
+            break
+    if not wm:
+        raise Skip("no window manager that runs on this server")
+    srv.run("xterm", "-geometry", "80x24+100+100", "-T", "managed", "-e", "sh", "-c", "ls -la /; sleep 60")
+    srv.run("xterm", "-geometry", "80x24+200+160", "-T", "second", "-e", "sleep", "60")
+    time.sleep(1.5)
+    c = srv.client()
+    c.attach()
+    win = c.find(title="managed")
+    expect(win, "%s: windows: %r" % (wm, list(c.windows.values())))
+    expect((win.w, win.h) == (484, 316), "%s: the frame was shared, not the xterm: %r" % (wm, win))
+    # the two overlap and are left where the window manager has them:
+    # focusing one brings it to the front, whole
+    for name in ("managed", "second", "managed"):
+        w = c.find(title=name)
+        expect(w, "%s: no window %r" % (wm, name))
+        c.focus(w)
+        c.settle()
+        pixels_agree(srv, c, [w])
+
+
+def test_stock_client(start, ctx):
+    """the xpra program itself attaches and shows the windows"""
+    need("xpra", "Xvfb", "xwininfo", "xclock")
+    srv = start()
+    srv.run("xclock", "-name", "stockclock")
+    disp = free_display()
+    env = dict(os.environ, DISPLAY=":%d" % disp)
+    env.pop("XAUTHORITY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    vfb = subprocess.Popen(["Xvfb", ":%d" % disp, "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = open(os.path.join(ctx.dir, "xpra-client.log"), "wb")
+    client = None
+    try:
+        expect(wait_for(lambda: os.path.exists("/tmp/.X11-unix/X%d" % disp), 8), "Xvfb did not start")
+        client = subprocess.Popen(
+            ["xpra", "attach", "tcp://127.0.0.1:%d/" % srv.xpra_port, "--opengl=no", "--mmap=no",
+             "--notifications=no", "--audio=no", "--tray=no", "--splash=no", "--webcam=no",
+             "--printing=no", "--file-transfer=no", "--mdns=no", "--headerbar=no",
+             "--remote-logging=no"],
+            env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+
+        def shown():
+            r = subprocess.run(["xwininfo", "-root", "-tree"], env=env, capture_output=True, text=True)
+            return "stockclock" in r.stdout or '"xclock' in r.stdout
+
+        ok = wait_for(shown, 30, 0.5)
+        log.flush()
+        expect(ok, "the xpra client did not show the window: " +
+               open(log.name, errors="replace").read()[-600:] + srv.tail(5))
+        expect(srv.alive(), "the server died: " + srv.tail())
+    finally:
+        if client and client.poll() is None:
+            os.killpg(client.pid, signal.SIGTERM)
+            try:
+                client.wait(8)
+            except subprocess.TimeoutExpired:
+                os.killpg(client.pid, signal.SIGKILL)
+        vfb.terminate()
+        vfb.wait(5)
+        log.close()
+
+
+TESTS = [(name[5:], fn) for name, fn in sorted(globals().items()) if name.startswith("test_")]
+# the cheap one first
+TESTS.sort(key=lambda t: (t[0] != "wire_format", t[0]))
+
+
+class Context:
+    pass
+
+
+def main(argv):
+    xvnc, failures_file, keep, verbose, names = DEFAULT_XVNC, None, False, False, []
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a == "--xvnc":
+            xvnc = os.path.abspath(args.pop(0))
+        elif a == "--failures":
+            failures_file = args.pop(0)
+        elif a == "--keep":
+            keep = True
+        elif a == "-v":
+            verbose = True
+        elif a == "--list":
+            for name, fn in TESTS:
+                print("%-22s %s" % (name, (fn.__doc__ or "").strip()))
+            return 0
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        elif a.startswith("-"):
+            sys.exit("run-tests: unknown option %s" % a)
+        else:
+            names.append(a)
+    unknown = [n for n in names if n not in dict(TESTS)]
+    if unknown:
+        sys.exit("run-tests: no such test: %s" % " ".join(unknown))
+    if not os.access(xvnc, os.X_OK):
+        sys.exit("run-tests: %s is not there: build the server first" % xvnc)
+
+    outdir = os.path.join(HERE, "out")
+    os.makedirs(outdir, exist_ok=True)
+    failed, skipped, passed = [], [], []
+    for name, fn in TESTS:
+        if names and name not in names:
+            continue
+        ctx = Context()
+        ctx.dir = tempfile.mkdtemp(prefix=name + "-", dir=outdir)
+        servers = []
+
+        def start(**kw):
+            srv = Server(xvnc, ctx.dir, verbose=verbose, **kw)
+            servers.append(srv)
+            return srv
+
+        t0 = time.monotonic()
+        result, detail = "ok", ""
+        try:
+            fn(start, ctx)
+            dead = [s for s in servers if not s.alive()]
+            if dead:
+                result, detail = "FAILED", "the server died: " + dead[0].tail()
+        except Skip as e:
+            result, detail = "skipped", str(e)
+        except Exception as e:      # a failed test, whatever it tripped over
+            result = "FAILED"
+            detail = str(e) if isinstance(e, AssertionError) else traceback.format_exc()
+            dead = [s for s in servers if not s.alive()]
+            if dead and "died" not in detail:
+                detail += "\n(the server had died: %s)" % dead[0].tail()
+        finally:
+            for s in servers:
+                try:
+                    s.stop()
+                except Exception:   # noqa: the result of the test stands
+                    pass
+        print("%-22s %-8s %5.1fs  %s" % (name, result, time.monotonic() - t0,
+                                         detail.strip().replace("\n", "\n" + " " * 39)))
+        sys.stdout.flush()
+        {"ok": passed, "skipped": skipped, "FAILED": failed}[result].append(name)
+        if not keep and result != "FAILED":
+            shutil.rmtree(ctx.dir, ignore_errors=True)
+
+    print("%d passed, %d failed, %d skipped" % (len(passed), len(failed), len(skipped)))
+    if failed:
+        print("logs of the failed tests are under %s" % outdir)
+    if failures_file:
+        with open(failures_file, "w") as f:
+            f.write("".join(n + "\n" for n in failed))
+        return 0
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
