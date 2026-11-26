@@ -59,6 +59,7 @@ in this Software without prior written authorization from the X Consortium.
 #include "regionstr.h"
 #include "dixfontstr.h"
 #include "rfb.h"
+#include "xpra.h"
 #include "mfb.h"
 
 extern WindowPtr *WindowTable; /* Why isn't this in a header file? */
@@ -80,7 +81,7 @@ int rfbDeferUpdateTime = 40; /* ms */
 #define TRC(x) /* (fprintf x) */
 
 /* ADD_TO_MODIFIED_REGION adds the given region to the modified region for each
-   client */
+   client, and to what Xpra clients are to be sent */
 
 #define ADD_TO_MODIFIED_REGION(pScreen,reg)				      \
   {									      \
@@ -88,6 +89,7 @@ int rfbDeferUpdateTime = 40; /* ms */
       for (cl = rfbClientHead; cl; cl = cl->next) {			      \
 	  REGION_UNION((pScreen),&cl->modifiedRegion,&cl->modifiedRegion,reg);\
       }									      \
+      xpraAddDamage((pScreen),reg);					      \
   }
 
 /* SCHEDULE_FB_UPDATE is used at the end of each drawing routine to schedule an
@@ -316,6 +318,8 @@ rfbCopyWindow (pWin, ptOldOrg, pOldRegion)
 		     pWin->drawable.y - ptOldOrg.y);
     REGION_INTERSECT(pWin->drawable.pScreen, &dstRegion, &dstRegion,
 		     &pWin->borderClip);
+
+    xpraAddDamage(pScreen, &dstRegion);
 
     for (cl = rfbClientHead; cl; cl = cl->next) {
 	if (cl->useCopyRect) {
@@ -704,6 +708,8 @@ rfbCopyArea (pSrc, pDst, pGC, srcx, srcy, w, h, dstx, dsty)
 	box.y1 = srcy + pSrc->y;
 	box.x2 = box.x1 + w;
 	box.y2 = box.y1 + h;
+
+	xpraAddDamage(pDst->pScreen, &dstRegion);
 
 	for (cl = rfbClientHead; cl; cl = cl->next) {
 	    if (cl->useCopyRect) {

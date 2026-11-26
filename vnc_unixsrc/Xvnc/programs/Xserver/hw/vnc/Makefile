@@ -6,7 +6,7 @@ ifndef LN
 $(error run make in vnc_unixsrc/Xvnc or above, not in this directory)
 endif
 
-SRCS = init.c sockets.c kbdptr.c cmap.c draw.c cutpaste.c dispcur.c sprite.c rfbserver.c translate.c httpd.c auth.c rre.c corre.c stats.c hextile.c zlib.c tight.c cursor.c
+SRCS = init.c sockets.c kbdptr.c cmap.c draw.c cutpaste.c dispcur.c sprite.c rfbserver.c translate.c httpd.c auth.c rre.c corre.c stats.c hextile.c zlib.c tight.c cursor.c xpra.c xpra_wire.c
 OBJS = $(SRCS:.c=.o)
 INCS = -I. -I../../../../exports/include/X11 -I../../../../include/fonts -I../../cfb -I../../mfb -I../../mi -I../../include -I../../os -I../../../../../include -I../../../../exports/include
 DEFS += -DDDXOSINIT -DSERVER_LOCK -DDDXOSFATALERROR -DDDXTIME -DPART_NET
@@ -19,6 +19,9 @@ libvnc.a: $(OBJS)
 
 init.o: init.c
 	$(CC) -c $(CPPFLAGS) $(CFLAGS) -Wno-error=format-security $(DEFS) $(INCS) -DXVNCRELEASE=\"TightVNC-1.3.10\" -o $@ $<
+
+xpra.o: xpra.c
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(DEFS) $(INCS) -DXVNCRELEASE=\"TightVNC-1.3.10\" -o $@ $<
 
 %.o: %.c
 	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(DEFS) $(INCS) -o $@ $<

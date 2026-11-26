@@ -80,6 +80,7 @@ from the X Consortium.
 #include <sys/param.h>
 #include "dix.h"
 #include "rfb.h"
+#include "xpra.h"
 #include <time.h>
 
 #ifdef CORBA
@@ -382,7 +383,7 @@ ddxProcessArgument (argc, argv, i)
 	FatalError("can't specify both -inetd and :displaynumber");
     }
 
-    return 0;
+    return xpraProcessArgument(argc, argv, i);
 }
 
 
@@ -414,6 +415,7 @@ InitOutput(screenInfo, argc, argv)
     rfbInitSockets();
     if (inetdSock == -1)
 	httpInitSockets();
+    xpraInit();
    
 
 #ifdef CORBA
@@ -603,6 +605,8 @@ rfbScreenInit(index, pScreen, argc, argv)
 	ret = cfbCreateDefColormap(pScreen);
     }
 
+    xpraScreenInit(pScreen);
+
     return ret;
 
 } /* end rfbScreenInit */
@@ -720,6 +724,7 @@ ProcessInputEvents()
 {
     rfbCheckFds();
     httpCheckFds();
+    xpraCheckFds();
 #ifdef CORBA
     corbaCheckFds();
 #endif
@@ -860,6 +865,7 @@ ddxGiveUp()
 	char unixSocketName[32];
 	sprintf(unixSocketName,"/tmp/.X11-unix/X%s",display);
 	unlink(unixSocketName);
+	xpraShutdown();
 #ifdef CORBA
 	shutdownCORBA();
 #endif
@@ -926,6 +932,7 @@ ddxUseMsg()
     ErrorF("-compatiblekbd         set META key = ALT key as in the original "
 								"VNC\n");
     ErrorF("-version               report Xvnc version on stderr\n");
+    xpraUseMsg();
     exit(1);
 }
 
