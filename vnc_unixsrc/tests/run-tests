@@ -88,7 +88,7 @@ def free_display():
 class Server:
     """An Xvnc on a display of its own, and the programs run on it."""
 
-    def __init__(self, xvnc, workdir, geometry="1400x1000", verbose=False, args=()):
+    def __init__(self, xvnc, workdir, geometry="1400x1000", verbose=False, args=(), rgb=True):
         self.dir = workdir
         self.display = free_display()
         self.rfb_port = free_port()
@@ -106,12 +106,13 @@ class Server:
         fonts = ",".join(d + "/" for d in FONT_DIRS if os.path.isdir(d))
         if not fonts:
             raise Skip("no X fonts found (xfonts-base)")
+        colours = rgb
         rgb = next((r for r in RGB_FILES if os.path.exists(r + ".txt")), None)
         cmd = [xvnc, ":%d" % self.display, "-auth", self.auth, "-nolisten", "tcp", "-localhost",
                "-geometry", geometry, "-depth", "24", "-rfbport", str(self.rfb_port),
                "-desktop", "tightvnc tests", "-fp", fonts,
                "-xprasocket", self.socket, "-xpraport", str(self.xpra_port)]
-        if rgb:
+        if rgb and colours:
             cmd += ["-co", rgb]
         cmd += list(args)
         self.logfile = open(self.log, "wb")
@@ -537,6 +538,24 @@ def test_come_and_go(start, ctx):
     expect(c.find(cls="XClock") is None, "the window that went was not taken back")
     expect(c.find(cls="XTerm"), "the other window went too")
     expect(keep.poll() is None, "the xterm died")
+
+
+def test_named_colours(start, ctx):
+    """colour names are known without the server being told where the list is (-co)"""
+    need("xsetroot", "xclock")
+    if not any(os.path.exists(r + ".txt") for r in RGB_FILES):
+        raise Skip("no rgb.txt on this machine")
+    srv = start(rgb=False)
+    srv.run("xclock", "-geometry", "100x100+0+0")      # or the server resets when xsetroot is done
+    time.sleep(0.8)
+    r = subprocess.run(["xsetroot", "-solid", "tomato"], env=srv.env(), capture_output=True, text=True,
+                       timeout=20)
+    time.sleep(0.5)
+    w, h, fb = rfb_grab(srv.rfb_port)
+    pixel = tuple(fb[((h - 1) * w + w - 1) * 4:((h - 1) * w + w - 1) * 4 + 3])
+    # tomato is red 255, green 99, blue 71
+    expect(pixel == (71, 99, 255), "the root window is not tomato: blue, green, red = %r; xsetroot said %r"
+           % (pixel, (r.stdout + r.stderr).strip()))
 
 
 def test_output_stress(start, ctx):
