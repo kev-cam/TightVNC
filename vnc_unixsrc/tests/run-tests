@@ -544,6 +544,26 @@ def test_come_and_go(start, ctx):
     expect(keep.poll() is None, "the xterm died")
 
 
+def test_failed_start(start, ctx):
+    """a server that cannot start leaves no lock file and no socket behind"""
+    busy = socket.socket()
+    busy.bind(("0.0.0.0", 0))
+    busy.listen(1)
+    for what, args in (("the RFB port is in use", ["-rfbport", str(busy.getsockname()[1])]),
+                       ("the Xpra socket's path is too long", ["-xprasocket", "/tmp/" + "x" * 200]),
+                       ("the Xpra port is in use", ["-xpraport", str(busy.getsockname()[1])])):
+        n = free_display()
+        rfb = [] if "-rfbport" in args else ["-rfbport", str(free_port())]
+        r = subprocess.run([ctx.xvnc, ":%d" % n, "-nolisten", "tcp", "-localhost"] + rfb + args,
+                           capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        left = [p for p in ("/tmp/.X%d-lock" % n, "/tmp/.X11-unix/X%d" % n) if os.path.exists(p)]
+        for p in left:
+            os.unlink(p)
+        expect(r.returncode != 0, "%s, and the server ran: %s" % (what, r.stderr[-300:]))
+        expect(not left, "%s: left behind %s" % (what, " and ".join(left)))
+    busy.close()
+
+
 def test_named_colours(start, ctx):
     """colour names are known without the server being told where the list is (-co)"""
     need("xsetroot", "xclock")
@@ -895,6 +915,7 @@ def main(argv):
         if names and name not in names:
             continue
         ctx = Context()
+        ctx.xvnc = xvnc
         ctx.dir = tempfile.mkdtemp(prefix=name + "-", dir=outdir)
         servers = []
 

@@ -79,6 +79,11 @@ static int maxFd = 0;
 /*
  * rfbInitSockets sets up the TCP and UDP sockets to listen for RFB
  * connections.  It does nothing if called again.
+ *
+ * What cannot be set up ends the server with FatalError, not exit: by now
+ * the display's lock file and socket exist, and only the server's own way
+ * out removes them.  Left behind, they make the vncserver script take the
+ * display for one that is in use.
  */
 
 void
@@ -96,13 +101,13 @@ rfbInitSockets()
 
 	if (fcntl(inetdSock, F_SETFL, O_NONBLOCK) < 0) {
 	    rfbLogPerror("fcntl");
-	    exit(1);
+	    FatalError("Xvnc: cannot go on\n");
 	}
 
 	if (setsockopt(inetdSock, IPPROTO_TCP, TCP_NODELAY,
 		       (char *)&one, sizeof(one)) < 0) {
 	    rfbLogPerror("setsockopt");
-	    exit(1);
+	    FatalError("Xvnc: cannot go on\n");
 	}
 
     	AddEnabledDevice(inetdSock);
@@ -120,7 +125,7 @@ rfbInitSockets()
 
     if ((rfbListenSock = ListenOnTCPPort(rfbPort)) < 0) {
 	rfbLogPerror("ListenOnTCPPort");
-	exit(1);
+	FatalError("Xvnc: cannot go on\n");
     }
 
     AddEnabledDevice(rfbListenSock);
@@ -134,7 +139,7 @@ rfbInitSockets()
 
 	if ((udpSock = ListenOnUDPPort(udpPort)) < 0) {
 	    rfbLogPerror("ListenOnUDPPort");
-	    exit(1);
+	    FatalError("Xvnc: cannot go on\n");
 	}
 	AddEnabledDevice(udpSock);
 	FD_SET(udpSock, &allFds);
@@ -312,7 +317,7 @@ rfbWaitForClient(sock)
     n = select(sock+1, &fds, NULL, NULL, &tv);
     if (n < 0) {
 	rfbLogPerror("rfbWaitForClient: select");
-	exit(1);
+	FatalError("Xvnc: cannot go on\n");
     }
     if (n == 0) {
 	rfbCloseSock(sock);
@@ -449,7 +454,7 @@ WriteExact(sock, buf, len)
 	} else if (n == 0) {
 
 	    rfbLog("WriteExact: write returned 0?\n");
-	    exit(1);
+	    FatalError("Xvnc: cannot go on\n");
 
 	} else {
 	    if (errno != EWOULDBLOCK && errno != EAGAIN) {

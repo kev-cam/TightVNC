@@ -96,7 +96,7 @@ httpInitSockets()
 
     if ((httpListenSock = ListenOnTCPPort(httpPort)) < 0) {
 	rfbLogPerror("ListenOnTCPPort");
-	exit(1);
+	FatalError("Xvnc: cannot go on\n");
     }
 
     AddEnabledDevice(httpListenSock);

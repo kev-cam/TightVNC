@@ -2095,7 +2095,7 @@ xpraListen(int sock, const char *what)
 {
     if (fcntl(sock, F_SETFL, O_NONBLOCK) < 0 || listen(sock, 8) < 0) {
 	rfbLogPerror("xpra: listen");
-	exit(1);
+	FatalError("Xvnc: cannot set up the Xpra socket\n");
     }
     AddEnabledDevice(sock);
     FD_SET(sock, &xpraFds);
@@ -2143,14 +2143,14 @@ xpraInitSockets(void)
 	if (xpraSocketArg) {
 	    if (strlen(xpraSocketArg) >= sizeof(xpraSocketPath)) {
 		rfbLog("xpra: socket path too long\n");
-		exit(1);
+		FatalError("Xvnc: cannot set up the Xpra socket\n");
 	    }
 	    strcpy(xpraSocketPath, xpraSocketArg);
 	} else if (!xpraDefaultSocketPath(xpraSocketPath,
 					  sizeof(xpraSocketPath))) {
 	    rfbLog("xpra: cannot work out a socket path in ~/.xpra, "
 		   "use -xprasocket\n");
-	    exit(1);
+	    FatalError("Xvnc: cannot set up the Xpra socket\n");
 	}
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
@@ -2162,7 +2162,7 @@ xpraInitSockets(void)
 	    if (connect(probe, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
 		rfbLog("xpra: %s is in use by another server\n",
 		       xpraSocketPath);
-		exit(1);
+		FatalError("Xvnc: cannot set up the Xpra socket\n");
 	    }
 	    close(probe);
 	}
@@ -2174,7 +2174,7 @@ xpraInitSockets(void)
 	    bind(xpraUnixSock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 	    rfbLogPerror("xpra: unix socket");
 	    xpraSocketPath[0] = '\0';
-	    exit(1);
+	    FatalError("Xvnc: cannot set up the Xpra socket\n");
 	}
 	umask(mask);
 	xpraListen(xpraUnixSock, xpraSocketPath);
@@ -2197,7 +2197,7 @@ xpraInitSockets(void)
 	if (xpraTcpSock < 0 || xpraTcpSock >= FD_SETSIZE ||
 	    bind(xpraTcpSock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 	    rfbLogPerror("xpra: TCP port");
-	    exit(1);
+	    FatalError("Xvnc: cannot set up the Xpra socket\n");
 	}
 	sprintf(what, "TCP port %d (loopback only)", xpraPort);
 	xpraListen(xpraTcpSock, what);
