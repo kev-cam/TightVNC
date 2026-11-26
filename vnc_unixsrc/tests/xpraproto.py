@@ -543,6 +543,78 @@ def rfb_grab(port, timeout=10.0):
         s.close()
 
 
+class RfbViewer:
+    """A viewer that stays connected and keeps asking for what has changed."""
+
+    def __init__(self, port, timeout=10.0):
+        s = self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        _recvn(s, 12)
+        s.sendall(b"RFB 003.008\n")
+        types = _recvn(s, _recvn(s, 1)[0])
+        if 1 not in types:
+            raise ValueError("the server wants authentication")
+        s.sendall(b"\x01")
+        if struct.unpack("!I", _recvn(s, 4))[0] != 0:
+            raise ValueError("security handshake failed")
+        s.sendall(b"\x01")
+        self.w, self.h = struct.unpack("!HH", _recvn(s, 4))
+        _recvn(s, 16)
+        _recvn(s, struct.unpack("!I", _recvn(s, 4))[0])
+        s.sendall(struct.pack("!BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
+        s.sendall(struct.pack("!BxHi", 2, 1, 0))            # raw only: the pointer is drawn in
+        self.updates = 0
+        self.rects = 0
+        self.closed = False
+        self.request(False)
+
+    def request(self, incremental=True):
+        self.sock.sendall(struct.pack("!BBHHHH", 3, 1 if incremental else 0, 0, 0, self.w, self.h))
+
+    def pump(self, seconds):
+        """Take in updates for this long, asking for the next after each."""
+        end = time.monotonic() + seconds
+        while not self.closed:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            self.sock.settimeout(left)
+            try:
+                mtype = self.sock.recv(1)
+            except socket.timeout:
+                return
+            except OSError:
+                mtype = b""
+            if not mtype:
+                self.closed = True
+                return
+            self.sock.settimeout(10)
+            try:
+                if mtype[0] == 0:
+                    nrects = struct.unpack("!xH", _recvn(self.sock, 3))[0]
+                    for _ in range(nrects):
+                        x, y, rw, rh, enc = struct.unpack("!HHHHi", _recvn(self.sock, 12))
+                        _recvn(self.sock, rw * rh * 4)
+                        self.rects += 1
+                    self.updates += 1
+                    self.request(True)
+                elif mtype[0] == 1:
+                    first, n = struct.unpack("!xHH", _recvn(self.sock, 5))
+                    _recvn(self.sock, n * 6)
+                elif mtype[0] == 3:
+                    _recvn(self.sock, struct.unpack("!xxxI", _recvn(self.sock, 7))[0])
+            except (Closed, OSError):
+                self.closed = True
+
+    def pointer(self, x, y, buttons=0):
+        self.sock.sendall(struct.pack("!BBHH", 5, buttons, x, y))
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 def compare(win, fb, origin=None):
     """Where a window's picture differs from the framebuffer: a list of
     (x, y) window coordinates, at most 20.  Pixels no draw has reached count

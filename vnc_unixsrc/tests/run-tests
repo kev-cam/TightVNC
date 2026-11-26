@@ -32,7 +32,7 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from xpraproto import XpraClient, Closed, rfb_grab, compare, rencode, lz4_store  # noqa: E402
+from xpraproto import XpraClient, RfbViewer, Closed, rfb_grab, compare, rencode, lz4_store  # noqa: E402
 
 TOP = os.path.dirname(HERE)
 DEFAULT_XVNC = os.path.join(TOP, "Xvnc", "programs", "Xserver", "Xvnc")
@@ -675,6 +675,35 @@ def test_server_reset(start, ctx):
     c.attach()
     expect(c.find(cls="XClock"), "no window after the second reset")
     pixels_agree(srv, c)
+
+
+def test_rfb_across_reset(start, ctx):
+    """a VNC viewer stays connected across the X server's reset, and is updated after it"""
+    need("xclock", "xterm")
+    srv = start()
+    app = srv.run("xclock", "-update", "1")
+    v = RfbViewer(srv.rfb_port)
+    v.pump(1.5)
+    expect(v.updates >= 1, "no update before the reset")
+    for round_ in range(3):
+        v.pointer(100 + round_, 100)
+        os.killpg(app.pid, signal.SIGTERM)
+        app.wait(5)
+        v.pump(1.5)                     # the reset happens in here
+        expect(srv.alive(), "the server died at reset %d: %s" % (round_ + 1, srv.tail()))
+        expect(not v.closed, "the viewer was dropped at reset %d: %s" % (round_ + 1, srv.tail()))
+        app = srv.run("xclock", "-update", "1")
+        v.pump(1.5)
+        before = v.updates
+        # the second hand moves once a second: the updates must keep coming
+        v.pump(4.0)
+        expect(srv.alive(), "the server died after reset %d: %s" % (round_ + 1, srv.tail()))
+        expect(v.updates >= before + 3,
+               "after reset %d the viewer got %d updates in 4 seconds of a ticking clock" %
+               (round_ + 1, v.updates - before))
+    v.close()
+    fb = rfb_grab(srv.rfb_port)
+    expect(fb[0] == 1400, "a new viewer after the resets: %r" % (fb[:2],))
 
 
 WINDOW_MANAGERS = (

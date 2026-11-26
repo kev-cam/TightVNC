@@ -1849,7 +1849,8 @@ xpraRead(XpraClient *c)
 	    if (n < 65536)
 		break;
 	} else if (n == 0) {
-	    xpraCloseClient(c, "connection closed");
+	    /* "xpra list" connects and leaves: not worth a line in the log */
+	    xpraCloseClient(c, c->ui ? "connection closed" : NULL);
 	    return;
 	} else if (errno == EINTR) {
 	    continue;

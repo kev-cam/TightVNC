@@ -25,6 +25,7 @@ Xvnc \- an X server providing VNC connectivity
 [\-economictranslate] [\-lazytight] [\-desktop \fIname\fR] [\-alwaysshared]
 [\-nevershared] [\-dontdisconnect] [\-viewonly] [\-localhost]
 [\-interface ipaddr] [\-inetd] [\-compatiblekbd]
+[\-xpra] [\-xprasocket path] [\-xpraport port]
 [\fIX-options\fR...]
 .SH DESCRIPTION
 \fBXvnc\fR is a VNC (Virtual Network Computing) server. It acts like
@@ -134,6 +135,57 @@ network input/output to stdin/stdout.
 \fB\-compatiblekbd\fR
 Set META and ALT keys to the same X modifier flag, as in the original
 version of Xvnc by AT&T labs (TightVNC-specific).
+.TP
+\fB\-xpra\fR
+Share the windows with Xpra clients as well (see XPRA below), on the unix
+socket \fI~/.xpra/host\-display\fR, which is where \fBxpra attach
+:display\fR and \fBxpra list\fR look.  Only the user who started the
+server can connect to it.
+.TP
+\fB\-xprasocket\fR \fIpath\fR
+The same, on this unix socket.
+.TP
+\fB\-xpraport\fR \fIport\fR
+The same, on this TCP port of the loopback interface.  Xpra clients are
+not asked for a password, so the port is not opened to the network: reach
+it through a tunnel (\fBssh \-L\fR).  May be given with \fB\-xpra\fR or
+\fB\-xprasocket\fR.
+.SH XPRA
+A VNC viewer shows the whole desktop in one window.  An Xpra client shows
+every top level window of the desktop as a window of its own, among the
+windows of the machine it runs on, titled, placed and resized by that
+machine's window manager.  Both can be connected at once.
+.PP
+.nf
+    Xvnc :1 \-geometry 3200x2000 \-xpra ...
+    xterm \-display :1 &
+    xpra attach :1                       (on the same machine)
+    xpra attach ssh://host/1             (from another, xpra installed on both)
+.fi
+.PP
+With \fB\-xpraport\fR and a tunnel, the far machine needs no xpra:
+.PP
+.nf
+    ssh \-L 14501:localhost:14501 host
+    xpra attach tcp://localhost:14501/
+.fi
+.PP
+One client at a time shows the windows; a client that connects takes over
+from the one before, as \fBxpra attach\fR does with any Xpra server.
+.PP
+This X server keeps one picture of the screen and nothing else, so of a
+window that another one covers, only the visible part can be sent.  When
+no window manager is running, Xvnc therefore keeps the windows apart: a
+new or resized window that would cover another, or reach beyond the
+screen, is moved to a free part of the screen.  Where a window is on the
+VNC screen makes no difference to an Xpra client, but the screen has to
+be large enough for the windows side by side: use a generous
+\fB\-geometry\fR.  Under a window manager the windows are left where
+they are; the one that is given the focus is raised, and what was covered
+is sent as the application repaints it.
+.PP
+Not supported: pointer shapes, the clipboard, sound, and the lossy picture
+encodings (windows are sent losslessly, compressed with LZ4).
 .SH BUGS
 There are many security problems in current Xvnc implementation. It's
 recommended to restrict network access to Xvnc servers from untrusted
