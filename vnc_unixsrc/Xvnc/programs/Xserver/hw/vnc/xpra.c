@@ -59,6 +59,8 @@
 #include "inputstr.h"
 #include "dixstruct.h"
 #include "colormapst.h"
+#include "cursorstr.h"
+#include "servermd.h"
 #include "Xatom.h"
 #include "rfb.h"
 #include "input.h"
@@ -89,6 +91,7 @@ extern char *desktopName;
 #define XPRA_MAX_UNACKED	3
 #define XPRA_MAX_TEXT		512
 #define XPRA_MIN_LZ4		256
+#define XPRA_MAX_CURSOR		128	/* pixels a side */
 
 typedef struct _XpraClient {
     struct _XpraClient *next;
@@ -105,6 +108,9 @@ typedef struct _XpraClient {
     Bool closing;		/* close once the output is written */
     Bool dead;			/* to be freed by xpraReap */
     Bool lz4;
+    Bool cursors;		/* wants the pointer's shape */
+    unsigned long cursorHash;	/* of the shape it was last sent */
+    unsigned long cursorSerial;
     unsigned long seq;		/* of the last draw packet */
     int unacked;		/* draw packets not acknowledged yet */
     CARD32 lastAck;
@@ -1272,6 +1278,90 @@ xpraFlush(void)
     return FALSE;
 }
 
+/*
+ * The pointer's shape, when it is not the one the client was sent last.
+ * X cursors here are two bitmaps, the shape and a mask, and two colours:
+ * sent as blue, green, red, alpha, opaque where the mask is set.  For the
+ * root window's cursor (the X of an X server with nothing under the
+ * pointer) the client is told to use its own.
+ */
+
+static void
+xpraSendCursor(XpraClient *c)
+{
+    ScreenPtr pScreen = screenInfo.screens[0];
+    CursorPtr pCursor = rfbSpriteGetCursorPtr(pScreen);
+    CursorBitsPtr bits = pCursor ? pCursor->bits : NULL;
+    unsigned long hash = 1;
+    int w = 0, h = 0, rowBytes = 0, x, y, px, py;
+    Bool lsb = screenInfo.bitmapBitOrder == LSBFirst;
+    unsigned char *out;
+
+    if (!c->cursors || c->dead || c->closing)
+	return;
+    if (pCursor == rootCursor || !bits || !bits->source || !bits->mask ||
+	bits->width < 1 || bits->height < 1 ||
+	bits->width > XPRA_MAX_CURSOR || bits->height > XPRA_MAX_CURSOR) {
+	bits = NULL;
+    } else {
+	w = bits->width;
+	h = bits->height;
+	rowBytes = PixmapBytePad(w, 1);
+	hash = xpraHash(2166136261UL, &bits->width, 4 * sizeof(bits->width));
+	hash = xpraHash(hash, &pCursor->foreRed, 6 * sizeof(pCursor->foreRed));
+	hash = xpraHash(hash, bits->source, (size_t)rowBytes * h);
+	hash = xpraHash(hash, bits->mask, (size_t)rowBytes * h);
+	if (hash == 1)
+	    hash = 2;
+    }
+    if (hash == c->cursorHash)
+	return;
+    c->cursorHash = hash;
+
+    xpraBegin("cursor");
+    if (!bits) {
+	xwPutStr(&xpraPkt, "");
+	xpraSend(c);
+	return;
+    }
+    xwBufReset(&xpraPix);
+    if (!xwBufReserve(&xpraPix, (size_t)w * h * 4))
+	return;
+    out = xpraPix.data;
+    for (y = 0; y < h; y++) {
+	for (x = 0; x < w; x++, out += 4) {
+	    int byte = y * rowBytes + x / 8;
+	    int bit = lsb ? 1 << (x & 7) : 0x80 >> (x & 7);
+
+	    if (!(bits->mask[byte] & bit)) {
+		out[0] = out[1] = out[2] = out[3] = 0;
+	    } else if (bits->source[byte] & bit) {
+		out[0] = (unsigned char)(pCursor->foreBlue >> 8);
+		out[1] = (unsigned char)(pCursor->foreGreen >> 8);
+		out[2] = (unsigned char)(pCursor->foreRed >> 8);
+		out[3] = 255;
+	    } else {
+		out[0] = (unsigned char)(pCursor->backBlue >> 8);
+		out[1] = (unsigned char)(pCursor->backGreen >> 8);
+		out[2] = (unsigned char)(pCursor->backRed >> 8);
+		out[3] = 255;
+	    }
+	}
+    }
+    rfbSpriteGetCursorPos(pScreen, &px, &py);
+    xwPutStr(&xpraPkt, "raw");
+    xwPutInt(&xpraPkt, px);
+    xwPutInt(&xpraPkt, py);
+    xwPutInt(&xpraPkt, w);
+    xwPutInt(&xpraPkt, h);
+    xwPutInt(&xpraPkt, bits->xhot < w ? bits->xhot : w - 1);
+    xwPutInt(&xpraPkt, bits->yhot < h ? bits->yhot : h - 1);
+    xwPutInt(&xpraPkt, (long long)++c->cursorSerial);
+    xwPutBytes(&xpraPkt, xpraPix.data, (size_t)w * h * 4);
+    xwPutStr(&xpraPkt, "");
+    xpraSend(c);
+}
+
 static CARD32
 xpraTimerCallback(OsTimerPtr timer, CARD32 now, pointer arg)
 {
@@ -1290,6 +1380,11 @@ xpraTimerCallback(OsTimerPtr timer, CARD32 now, pointer arg)
 	    xpraWrite(c);
     }
     xpraScan();
+    if (xpraUI) {
+	xpraSendCursor(xpraUI);
+	if (!xpraUI->dead)
+	    xpraWrite(xpraUI);
+    }
     more = xpraFlush();
     xpraBusy = FALSE;
     if (xpraTimerSet)			/* set again from in there */
@@ -1509,6 +1604,8 @@ xpraHandlePointer(XwValue *widv, XwValue *pos, int button, Bool pressed)
 	}
     }
     PtrAddEvent(xpraButtonMask, x, y, NULL);
+    /* it may be over something with another pointer shape now */
+    xpraSchedule(XPRA_DEFER_MS);
 }
 
 /* key-action: wid, key name, pressed, modifiers, keysym, text, keycode, group */
@@ -1563,7 +1660,7 @@ xpraSendHello(XpraClient *c)
     xwKeyInt(b, "elapsed_time", (long long)(now - xpraStartTime));
     xwKeyBool(b, "windows", 1);
     xwKeyBool(b, "keyboard", 1);
-    xwKeyBool(b, "cursors", 0);
+    xwKeyBool(b, "cursors", 1);
     xwKeyBool(b, "bell", 0);
     xwKeyBool(b, "pointer.relative", 1);
     xwKeyBool(b, "readonly", 0);
@@ -1609,6 +1706,10 @@ xpraHandleHello(XpraClient *c, XwValue *p)
     v = xwGet(caps, "lz4");
     c->lz4 = xwListHas(xwGet(caps, "compressors"), "lz4") ||
 	(v && (v->type == XW_DICT || xwBool(v, 0)));
+    /* pointer shapes go as plain pixels: every client takes those */
+    v = xwGet(xwGet(caps, "cursor"), "encodings");
+    c->cursors = xwBool(xwGet(caps, "cursors"), 0) &&
+	(!v || xwListHas(v, "raw"));
     if (!xwGet(caps, "rencodeplus") &&
 	!xwListHas(xwGet(caps, "encoders"), "rencodeplus")) {
 	xpraDisconnect(c, "this server speaks rencodeplus only");

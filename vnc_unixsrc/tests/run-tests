@@ -469,6 +469,42 @@ def test_resize(start, ctx):
     pixels_agree(srv, c)
 
 
+def test_cursor(start, ctx):
+    """the pointer's shape follows what it is over"""
+    need("xterm", "xclock")
+    srv = start()
+    srv.run("xterm", "-geometry", "80x24+50+50", "-e", "sleep", "60")
+    srv.run("xclock", "-geometry", "200x200+700+50")
+    time.sleep(1.0)
+    c = srv.client()
+    c.attach()
+    term, clock = c.find(cls="XTerm"), c.find(cls="XClock")
+    expect(term and clock, "windows: %r" % list(c.windows.values()))
+    c.pointer(term, 100, 100)
+    wait_for(lambda: c.pump(0.2) and isinstance(c.cursor, list), 4)
+    cur = c.cursor
+    expect(isinstance(cur, list), "no pointer shape over the xterm: %r" % (cur,))
+    encoding, x, y, w, h, xhot, yhot, serial, pixels = cur[:9]
+    expect(encoding == "raw", "encoding %r" % encoding)
+    expect(0 < w <= 64 and 0 < h <= 64 and len(pixels) == w * h * 4,
+           "%dx%d cursor with %d bytes" % (w, h, len(pixels)))
+    expect(0 <= xhot < w and 0 <= yhot < h, "hot spot %d,%d in %dx%d" % (xhot, yhot, w, h))
+    alphas = set(pixels[3::4])
+    expect(alphas == {0, 255}, "a text cursor is part opaque, part clear: alphas %r" % sorted(alphas))
+    # the xterm's is an I beam: taller than wide, a black stem outlined in white
+    opaque = {bytes(pixels[i:i + 3]) for i in range(0, len(pixels), 4) if pixels[i + 3]}
+    expect(h > w and opaque == {b"\x00\x00\x00", b"\xff\xff\xff"},
+           "%dx%d in colours %r does not look like xterm's I beam" % (w, h, sorted(opaque)))
+    # the clock has no cursor of its own: the root's, for which the client uses its default
+    c.pointer(clock, 100, 100)
+    wait_for(lambda: c.pump(0.2) and c.cursor == "", 4)
+    expect(c.cursor == "", "over the clock the client was not told to use its own pointer: %r" % (c.cursor,))
+    c.pointer(term, 50, 50)
+    wait_for(lambda: c.pump(0.2) and isinstance(c.cursor, list), 4)
+    expect(isinstance(c.cursor, list) and bytes(c.cursor[8]) == bytes(pixels),
+           "back over the xterm, not its shape again")
+
+
 def test_close(start, ctx):
     """closing a window asks its program to close it"""
     need("xclock")

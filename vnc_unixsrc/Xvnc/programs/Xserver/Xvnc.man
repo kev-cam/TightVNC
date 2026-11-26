@@ -184,8 +184,8 @@ be large enough for the windows side by side: use a generous
 they are; the one that is given the focus is raised, and what was covered
 is sent as the application repaints it.
 .PP
-Not supported: pointer shapes, the clipboard, sound, and the lossy picture
-encodings (windows are sent losslessly, compressed with LZ4).
+Not supported: the clipboard, sound, and the lossy picture encodings
+(windows are sent losslessly, compressed with LZ4).
 .SH BUGS
 There are many security problems in current Xvnc implementation. It's
 recommended to restrict network access to Xvnc servers from untrusted

@@ -240,6 +240,7 @@ class XpraClient:
         self.lost = []              # windows that have gone
         self.packets = []           # everything received, in order
         self.disconnected = None    # the reason, once told
+        self.cursor = None          # the last pointer shape: None, "" or a packet
         self.closed = False
         self.seq = 0
 
@@ -281,6 +282,8 @@ class XpraClient:
             "client_type": "tightvnc tests",
             "windows": True,
             "keyboard": True,
+            "cursors": True,
+            "cursor": {"encodings": ["raw", "default", "png"]},
             "desktop_size": [1600, 1200],
         }
         if request:
@@ -356,6 +359,8 @@ class XpraClient:
                     win.resize(p[4], p[5])
         elif t == "draw":
             self._draw(p)
+        elif t == "cursor":
+            self.cursor = p[1] if len(p) == 2 else p[1:]
         elif t == "disconnect":
             self.disconnected = p[1] if len(p) > 1 else ""
 

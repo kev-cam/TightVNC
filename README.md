@@ -91,9 +91,9 @@ window is visible, and only that part can be sent.
   the focus is raised, and what was covered arrives as it is repainted.
 - A window cannot be made larger than the screen.
 
-Not there yet: pointer shapes, the clipboard, the bell, lossy encodings
-(windows are sent losslessly, LZ4 compressed), authentication on the TCP
-port.
+The pointer takes the shape the application gives it. Not there yet: the
+clipboard, the bell, lossy encodings (windows are sent losslessly, LZ4
+compressed), authentication on the TCP port.
 
 The code: `hw/vnc/xpra_wire.c` is the wire format (packets, rencodeplus,
 LZ4) and nothing else; `hw/vnc/xpra.c` is the server side. Both under
