@@ -14,6 +14,14 @@
  * of a window is sent; what another window covers is sent when the
  * application repaints it after being uncovered, which giving a window the
  * focus (or clicking in it) brings about by raising it.
+ *
+ * So that it does not come to that, when no window manager is running the
+ * windows are kept apart: where a window is on this screen is of no
+ * consequence to a client that places it on its own desktop, and a window
+ * that would lie over another, or off the screen, is moved to a free part
+ * of it (xpraPlace).  Give the server a screen large enough for the
+ * windows side by side (-geometry).  Under a window manager the windows
+ * are left where they are.
  */
 
 /*
@@ -145,6 +153,14 @@ static RegionRec xpraDamage;		/* changed since the last flush */
 static Bool xpraDamageValid = FALSE;
 static OsTimerPtr xpraTimer = NULL;
 static Bool xpraTimerSet = FALSE;
+
+/*
+ * Set while packets are being handled or sent.  Handling one can come back
+ * here: SetInputFocus, for one, calls UpdateCurrentTime, which calls
+ * ProcessInputEvents, which calls xpraCheckFds - and a second reader of
+ * the same socket would take the packets out from under the first.
+ */
+static Bool xpraBusy = FALSE;
 
 static XwBuf xpraPkt;			/* the packet being built */
 static XwBuf xpraPix;			/* its pixels */
@@ -511,14 +527,16 @@ xpraMetaHash(WindowPtr pApp)
 	&atomNET_WM_NAME, &atomNET_WM_WINDOW_TYPE, &atomNET_WM_PID
     };
     static const Atom fixed[] = {
-	XA_WM_NAME, XA_WM_CLASS, XA_WM_NORMAL_HINTS, XA_WM_TRANSIENT_FOR
+	XA_WM_NAME, XA_WM_CLASS, XA_WM_NORMAL_HINTS, XA_WM_TRANSIENT_FOR,
+	XA_WM_CLIENT_MACHINE
     };
+#define N_FIXED (sizeof(fixed) / sizeof(fixed[0]))
     unsigned long h = 2166136261UL;
     PropertyPtr p;
     unsigned int i;
 
-    for (i = 0; i < sizeof(names) / sizeof(names[0]) + 4; i++) {
-	Atom a = i < 4 ? fixed[i] : *names[i - 4];
+    for (i = 0; i < sizeof(names) / sizeof(names[0]) + N_FIXED; i++) {
+	Atom a = i < N_FIXED ? fixed[i] : *names[i - N_FIXED];
 
 	p = xpraProp(pApp, a);
 	if (p && p->data && p->size > 0 && p->size < 65536)
@@ -632,6 +650,20 @@ xpraPutMetadata(XwBuf *b, XpraWin *win, WindowPtr pApp)
     v = xpraProp32(pApp, atomNET_WM_PID, &n);
     if (v)
 	xwKeyInt(b, "pid", (long long)v[0]);
+
+    /* the machine the application runs on: clients put it in the title */
+    p = xpraProp(pApp, XA_WM_CLIENT_MACHINE);
+    xwPutStr(b, "client-machine");
+    if (p && p->format == 8 && p->data && p->size > 0) {
+	xpraPutText(b, (unsigned char *)p->data, (size_t)p->size);
+    } else {
+	char host[256];
+
+	host[0] = '\0';
+	gethostname(host, sizeof(host) - 1);
+	host[sizeof(host) - 1] = '\0';
+	xpraPutText(b, (unsigned char *)host, strlen(host));
+    }
 
     parent = xpraParentOf(win, pApp);
     win->parentWid = parent ? parent->wid : 0;
@@ -759,6 +791,115 @@ xpraForgetAll(void)
 	xpraForget(xpraWins);
 }
 
+/* the rectangle a top level window takes up, border included */
+static void
+xpraOuterBox(WindowPtr pTop, BoxPtr box)
+{
+    int bw = wBorderWidth(pTop);
+
+    box->x1 = pTop->drawable.x - bw;
+    box->y1 = pTop->drawable.y - bw;
+    box->x2 = pTop->drawable.x + pTop->drawable.width + bw;
+    box->y2 = pTop->drawable.y + pTop->drawable.height + bw;
+}
+
+/* does a window count for placement: mapped, not a popup, not pSelf */
+static Bool
+xpraPlaced(WindowPtr pTop, WindowPtr pSelf)
+{
+    return pTop != pSelf && pTop->viewable && !pTop->overrideRedirect &&
+	pTop->drawable.width >= 2 && pTop->drawable.height >= 2;
+}
+
+/* is this part of the screen clear of the other windows? */
+static Bool
+xpraBoxFree(BoxPtr box, WindowPtr pSelf)
+{
+    WindowPtr pSib;
+    BoxRec other;
+
+    if (box->x1 < 0 || box->y1 < 0 || box->x2 > rfbScreen.width ||
+	box->y2 > rfbScreen.height)
+	return FALSE;
+    for (pSib = WindowTable[0]->firstChild; pSib; pSib = pSib->nextSib) {
+	if (!xpraPlaced(pSib, pSelf))
+	    continue;
+	xpraOuterBox(pSib, &other);
+	if (box->x1 < other.x2 && box->x2 > other.x1 &&
+	    box->y1 < other.y2 && box->y2 > other.y1)
+	    return FALSE;
+    }
+    return TRUE;
+}
+
+#define XPRA_PLACE_GAP	4
+
+/*
+ * Without a window manager: move a window that lies over another, or
+ * partly off the screen, to where it is clear.  The places tried are the
+ * top left corner and beside and below each of the other windows; the one
+ * nearest the top, then nearest the left, is taken.  If the window fits
+ * nowhere it stays where it is.
+ */
+
+static void
+xpraPlace(WindowPtr pTop)
+{
+    WindowPtr pSib;
+    BoxRec box, other;
+    int w, h, i, bestX = -1, bestY = -1;
+    XID vlist[2];
+
+    xpraOuterBox(pTop, &box);
+    if (xpraBoxFree(&box, pTop))
+	return;
+    w = box.x2 - box.x1;
+    h = box.y2 - box.y1;
+    if (w > rfbScreen.width || h > rfbScreen.height)
+	return;
+
+    for (pSib = NULL;;) {
+	int cand[4][2], n = 0;
+
+	if (!pSib) {
+	    cand[n][0] = 0;
+	    cand[n++][1] = 0;
+	} else if (xpraPlaced(pSib, pTop)) {
+	    xpraOuterBox(pSib, &other);
+	    cand[n][0] = other.x2 + XPRA_PLACE_GAP;
+	    cand[n++][1] = other.y1;
+	    cand[n][0] = other.x1;
+	    cand[n++][1] = other.y2 + XPRA_PLACE_GAP;
+	    cand[n][0] = other.x2 + XPRA_PLACE_GAP;
+	    cand[n++][1] = 0;
+	    cand[n][0] = 0;
+	    cand[n++][1] = other.y2 + XPRA_PLACE_GAP;
+	}
+	for (i = 0; i < n; i++) {
+	    int x = cand[i][0], y = cand[i][1];
+
+	    if (bestX >= 0 && (y > bestY || (y == bestY && x >= bestX)))
+		continue;
+	    box.x1 = x;
+	    box.y1 = y;
+	    box.x2 = x + w;
+	    box.y2 = y + h;
+	    if (xpraBoxFree(&box, pTop)) {
+		bestX = x;
+		bestY = y;
+	    }
+	}
+	pSib = pSib ? pSib->nextSib : WindowTable[0]->firstChild;
+	if (!pSib)
+	    break;
+    }
+    if (bestX < 0)
+	return;
+    vlist[0] = (XID)bestX;
+    vlist[1] = (XID)bestY;
+    ConfigureWindow(pTop, CWX | CWY, vlist, serverClient);
+}
+
 /*
  * Compare the top level windows with what the client has been told:
  * announce the new ones, take back the ones that have gone, report
@@ -772,6 +913,7 @@ xpraScan(void)
     WindowPtr pTop, pApp;
     XpraWin *win, *next;
     CARD32 now = GetTimeInMillis();
+    Bool bare = xpraWMClient() == NULL;
 
     if (!c)
 	return;
@@ -785,10 +927,16 @@ xpraScan(void)
 	if (!pTop->viewable)
 	    continue;
 	pApp = xpraAppWindow(pTop);
-	x = pApp->drawable.x;
-	y = pApp->drawable.y;
 	w = pApp->drawable.width;
 	h = pApp->drawable.height;
+	/* a new window, or a new size: it may be in the way of another */
+	if (bare && xpraPlaced(pTop, NULL)) {
+	    win = xpraFindXid(pApp->drawable.id);
+	    if (!win || !win->sent || w != win->w || h != win->h)
+		xpraPlace(pTop);
+	}
+	x = pApp->drawable.x;
+	y = pApp->drawable.y;
 	/* not the 1x1 and off-screen windows toolkits keep for themselves */
 	if (w < 2 || h < 2 || x >= rfbScreen.width || y >= rfbScreen.height ||
 	    x + w <= 0 || y + h <= 0)
@@ -1131,12 +1279,19 @@ xpraTimerCallback(OsTimerPtr timer, CARD32 now, pointer arg)
     Bool more;
 
     xpraTimerSet = FALSE;
+    if (xpraBusy) {
+	/* not from inside the handling of a packet: very soon instead */
+	xpraTimerSet = TRUE;
+	return 1;
+    }
+    xpraBusy = TRUE;
     for (c = xpraClients; c; c = c->next) {
 	if (!c->dead && c->outPos < c->out.len)
 	    xpraWrite(c);
     }
     xpraScan();
     more = xpraFlush();
+    xpraBusy = FALSE;
     if (xpraTimerSet)			/* set again from in there */
 	return 0;
     if (!xpraUI)
@@ -1584,6 +1739,10 @@ xpraParse(XpraClient *c)
 	int i;
 
 	if (xwParseHeader(p, &h) < 0) {
+	    rfbLog("xpra: %s: not a packet header: %02x %02x %02x %02x %02x "
+		   "%02x %02x %02x (at %lu of %lu)\n", c->name, p[0], p[1], p[2],
+		   p[3], p[4], p[5], p[6], p[7], (unsigned long)pos,
+		   (unsigned long)c->in.len);
 	    xpraCloseClient(c, "not an xpra client");
 	    return;
 	}
@@ -1803,7 +1962,7 @@ xpraCheckFds(void)
     fd_set fds;
     int n;
 
-    if (!xpraEnabled || xpraMaxFd < 0)
+    if (!xpraEnabled || xpraMaxFd < 0 || xpraBusy)
 	return;
     memcpy((char *)&fds, (char *)&xpraFds, sizeof(fd_set));
     tv.tv_sec = 0;
@@ -1811,6 +1970,7 @@ xpraCheckFds(void)
     n = select(xpraMaxFd + 1, &fds, NULL, NULL, &tv);
     if (n <= 0)
 	return;
+    xpraBusy = TRUE;
     if (xpraUnixSock >= 0 && FD_ISSET(xpraUnixSock, &fds))
 	xpraNewClient(xpraUnixSock, FALSE);
     if (xpraTcpSock >= 0 && FD_ISSET(xpraTcpSock, &fds))
@@ -1821,6 +1981,7 @@ xpraCheckFds(void)
 	    xpraRead(c);
     }
     xpraReap();
+    xpraBusy = FALSE;
 }
 
 
@@ -1968,6 +2129,7 @@ xpraInit(void)
      * have been freed with it.
      */
     xpraForgetAll();
+    xpraBusy = FALSE;
     xpraTimer = NULL;
     xpraTimerSet = FALSE;
     xpraButtonMask = 0;
