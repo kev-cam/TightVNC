@@ -936,6 +936,203 @@ def test_stock_client(start, ctx):
         log.close()
 
 
+def clip_helper(ctx):
+    """tests/clip.c, built for this test: own or read a selection."""
+    need("cc")
+    helper = os.path.join(ctx.dir, "clip")
+    r = subprocess.run(["cc", "-O2", "-o", helper, os.path.join(HERE, "clip.c"), "-lX11"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        raise Skip("tests/clip.c does not compile here (libx11-dev?): " + r.stderr[-200:])
+    return helper
+
+
+def clip_own(env, helper, selection, text, chunk=None, workdir="/tmp"):
+    if isinstance(text, bytes):
+        fd, path = tempfile.mkstemp(dir=workdir, suffix=".clip")
+        os.write(fd, text)
+        os.close(fd)
+        text = "@" + path
+    p = subprocess.Popen([helper, "own", selection, text] + ([str(chunk)] if chunk else []), env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    expect(p.stdout.readline().strip() == b"owned", "the helper could not own " + selection)
+    return p
+
+
+def clip_get(env, helper, selection, target="UTF8_STRING", wait=True):
+    """(status, output) of a paste; with wait=False, the running process."""
+    p = subprocess.Popen([helper, "get", selection, target], env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    if not wait:
+        return p
+    out = p.communicate(timeout=30)[0]
+    return p.returncode, out
+
+
+def last(c, kind, pred=lambda p: True):
+    for p in reversed(c.packets):
+        if p[0] == kind and pred(p):
+            return p
+    return None
+
+
+def test_clipboard(start, ctx):
+    """the clipboard at the protocol level: tokens, requests, contents both ways"""
+    helper = clip_helper(ctx)
+    srv = start()
+    env = srv.env()
+    c = srv.client()
+    owners = []
+    try:
+        c.hello(clipboard={"enabled": True, "selections": ["CLIPBOARD", "PRIMARY"]})
+        expect(c.pump(10, lambda c: any(p[0] == "startup-complete" for p in c.packets)), "no startup-complete")
+        caps = c.server.get("clipboard") or {}
+        expect(isinstance(caps, dict) and "CLIPBOARD" in caps.get("selections", ()), "server caps: %r" % caps)
+
+        # an application here copies: the client is told, and asks
+        text = "copied in the VNC desktop: \u00e9\u2713".encode()
+        owners.append(clip_own(env, helper, "CLIPBOARD", text))
+        expect(c.pump(5, lambda c: last(c, "clipboard-token", lambda p: p[1] == "CLIPBOARD")),
+               "no clipboard-token")
+        c.send("clipboard-request", 7, "CLIPBOARD", "TARGETS")
+        p = c.pump(5, lambda c: last(c, "clipboard-contents", lambda p: p[1] == 7)) and \
+            last(c, "clipboard-contents", lambda p: p[1] == 7)
+        expect(p and p[3] == "ATOM" and p[4] == 32 and p[5] == "atoms" and "UTF8_STRING" in p[6],
+               "TARGETS came as %r" % (p,))
+        c.send("clipboard-request", 8, "CLIPBOARD", "UTF8_STRING")
+        p = c.pump(5, lambda c: last(c, "clipboard-contents", lambda p: p[1] == 8)) and \
+            last(c, "clipboard-contents", lambda p: p[1] == 8)
+        expect(p and p[5] == "bytes" and bytes(p[6]) == text, "the text came as %r" % (p,))
+        c.send("clipboard-request", 9, "CLIPBOARD", "image/png")
+        expect(c.pump(5, lambda c: last(c, "clipboard-contents-none", lambda p: p[1] == 9)),
+               "a target the owner does not have was not refused")
+
+        # the client copies: the application here loses the selection, a paste asks the client
+        c.send("clipboard-token", "CLIPBOARD")
+        expect(wait_for(lambda: owners[0].poll() is not None, 5), "the owner here kept the selection")
+        paste = clip_get(env, helper, "CLIPBOARD", wait=False)
+        expect(c.pump(5, lambda c: last(c, "clipboard-request", lambda p: p[2] == "CLIPBOARD")),
+               "no clipboard-request for the paste")
+        req = last(c, "clipboard-request")
+        text2 = "copied on the client side".encode()
+        # as a stock client does with long contents: in a raw chunk
+        c.send("clipboard-contents", req[1], "CLIPBOARD", "UTF8_STRING", 8, "bytes", text2, 0, chunk=6)
+        out = paste.communicate(timeout=10)[0]
+        expect(paste.returncode == 0 and out == text2, "pasted %r (status %r)" % (out, paste.returncode))
+
+        # targets given with the token are answered here without asking
+        c.send("clipboard-token", "PRIMARY", ["UTF8_STRING", "STRING"])
+        time.sleep(0.3)
+        n = len(c.packets)
+        status, out = clip_get(env, helper, "PRIMARY", "TARGETS")
+        c.pump(0.3)
+        expect(status == 0 and b"UTF8_STRING" in out.split() and b"TARGETS" in out.split(),
+               "TARGETS here: %r" % out)
+        expect(not any(p[0] == "clipboard-request" for p in c.packets[n:]), "TARGETS was asked of the client")
+
+        # the client has nothing: the paste gets nothing
+        paste = clip_get(env, helper, "PRIMARY", wait=False)
+        expect(c.pump(5, lambda c: last(c, "clipboard-request", lambda p: p[2] == "PRIMARY")), "no request")
+        c.send("clipboard-contents-none", last(c, "clipboard-request")[1], "PRIMARY")
+        paste.communicate(timeout=10)
+        expect(paste.returncode == 1, "status %r" % paste.returncode)
+
+        # the client does not answer: the paste gets nothing after a while, not never
+        t0 = time.monotonic()
+        status, out = clip_get(env, helper, "PRIMARY")
+        expect(status == 1 and time.monotonic() - t0 < 9, "status %r after %.1fs" % (status, time.monotonic() - t0))
+
+        # large contents here go in parts (INCR) to the server, whole to the client
+        big = b"".join(b"line %07d of something large\n" % i for i in range(50000))
+        owners.append(clip_own(env, helper, "PRIMARY", big, 65536, ctx.dir))
+        expect(c.pump(5, lambda c: last(c, "clipboard-token", lambda p: p[1] == "PRIMARY")), "no token")
+        c.send("clipboard-request", 21, "PRIMARY", "UTF8_STRING")
+        p = c.pump(15, lambda c: last(c, "clipboard-contents", lambda p: p[1] == 21)) and \
+            last(c, "clipboard-contents", lambda p: p[1] == 21)
+        expect(p and bytes(p[6]) == big, "%d bytes of %d" % (len(bytes(p[6])) if p else 0, len(big)))
+
+        # the client goes: what was held for it is let go
+        c.send("clipboard-token", "CLIPBOARD")
+        c.pump(0.3)
+        c.close()
+        time.sleep(0.5)
+        t0 = time.monotonic()
+        status, out = clip_get(env, helper, "CLIPBOARD")
+        expect(status == 1 and time.monotonic() - t0 < 2, "after the client left: status %r" % status)
+        expect(srv.alive(), "the server died: " + srv.tail())
+
+        # a client that does not do clipboards is sent no tokens
+        c = srv.client()
+        c.attach()
+        owners.append(clip_own(env, helper, "CLIPBOARD", "nothing for it"))
+        c.pump(1.0)
+        expect(not last(c, "clipboard-token"), "a token went to a client without a clipboard")
+    finally:
+        for p in owners:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(5)
+        c.close()
+
+
+def test_stock_clipboard(start, ctx):
+    """the xpra program itself: copy on one side, paste on the other"""
+    need("xpra", "Xvfb", "xwininfo", "xclock")
+    helper = clip_helper(ctx)
+    srv = start()
+    srv.run("xclock", "-name", "stockclock")
+    disp = free_display()
+    env = dict(os.environ, DISPLAY=":%d" % disp)
+    env.pop("XAUTHORITY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    vfb = subprocess.Popen(["Xvfb", ":%d" % disp, "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = open(os.path.join(ctx.dir, "xpra-client.log"), "wb")
+    client = None
+    owners = []
+    try:
+        expect(wait_for(lambda: os.path.exists("/tmp/.X11-unix/X%d" % disp), 8), "Xvfb did not start")
+        client = subprocess.Popen(
+            ["xpra", "attach", "tcp://127.0.0.1:%d/" % srv.xpra_port, "--opengl=no", "--mmap=no",
+             "--notifications=no", "--audio=no", "--tray=no", "--splash=no", "--webcam=no",
+             "--printing=no", "--file-transfer=no", "--mdns=no", "--headerbar=no",
+             "--remote-logging=no", "--clipboard=yes"],
+            env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+
+        def shown():
+            r = subprocess.run(["xwininfo", "-root", "-tree"], env=env, capture_output=True, text=True)
+            return "stockclock" in r.stdout or '"xclock' in r.stdout
+
+        expect(wait_for(shown, 30, 0.5), "the xpra client did not show the window")
+        time.sleep(1.0)
+        text = "from the VNC desktop \u2713".encode()
+        owners.append(clip_own(srv.env(), helper, "CLIPBOARD", text))
+        got = wait_for(lambda: clip_get(env, helper, "CLIPBOARD")[1] == text, 15, 0.5)
+        expect(got, "pasted on the client's display: %r" % (clip_get(env, helper, "CLIPBOARD"),))
+        text2 = ("from the client's display \u00e9 " + "x" * 5000).encode()   # long: sent compressed
+        owners.append(clip_own(env, helper, "CLIPBOARD", text2))
+        got = wait_for(lambda: clip_get(srv.env(), helper, "CLIPBOARD")[1] == text2, 15, 0.5)
+        log.flush()
+        expect(got, "pasted in the VNC desktop: %r; %s" % (clip_get(srv.env(), helper, "CLIPBOARD")[1][:80],
+                                                         open(log.name, errors="replace").read()[-400:]))
+        expect(srv.alive(), "the server died: " + srv.tail())
+    finally:
+        for p in owners:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(5)
+        if client and client.poll() is None:
+            os.killpg(client.pid, signal.SIGTERM)
+            try:
+                client.wait(8)
+            except subprocess.TimeoutExpired:
+                os.killpg(client.pid, signal.SIGKILL)
+        vfb.terminate()
+        vfb.wait(5)
+        log.close()
+
+
 TESTS = [(name[5:], fn) for name, fn in sorted(globals().items()) if name.startswith("test_")]
 # the cheap one first
 TESTS.sort(key=lambda t: (t[0] != "wire_format", t[0]))

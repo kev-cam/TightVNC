@@ -184,8 +184,14 @@ be large enough for the windows side by side: use a generous
 they are; the one that is given the focus is raised, and what was covered
 is sent as the application repaints it.
 .PP
-Not supported: the clipboard, sound, and the lossy picture encodings
-(windows are sent losslessly, compressed with LZ4).
+The CLIPBOARD and PRIMARY selections are shared with the Xpra client both
+ways: what is copied on one side can be pasted on the other.  The contents
+are sent only when something is pasted, up to 16 megabytes.  When the
+client goes, what it had copied is let go at once.  (VNC viewers still get
+and give cut text through the cut buffer, as before.)
+.PP
+Not supported: sound, the bell, and the lossy picture encodings (windows
+are sent losslessly, compressed with LZ4).
 .SH BUGS
 There are many security problems in current Xvnc implementation. It's
 recommended to restrict network access to Xvnc servers from untrusted

@@ -66,6 +66,7 @@
 #include "input.h"
 #include "mipointer.h"
 #include "sprite.h"
+#include "selection.h"
 #include "xpra.h"
 #include "xpra_wire.h"
 
@@ -179,6 +180,12 @@ static Atom atomNET_WM_NAME, atomUTF8_STRING, atomNET_WM_WINDOW_TYPE;
 static Atom atomNET_WM_PID;
 
 static void xpraSchedule(int ms);
+static void xpraClipExpire(void);
+static void xpraClipRelease(void);
+
+/* the dix's table of selection owners (dix/dispatch.c) */
+extern Selection *CurrentSelections;
+extern int NumCurrentSelections;
 static void xpraCloseClient(XpraClient *c, const char *why);
 
 
@@ -1380,6 +1387,7 @@ xpraTimerCallback(OsTimerPtr timer, CARD32 now, pointer arg)
 	    xpraWrite(c);
     }
     xpraScan();
+    xpraClipExpire();
     if (xpraUI) {
 	xpraSendCursor(xpraUI);
 	if (!xpraUI->dead)
@@ -1620,6 +1628,873 @@ xpraHandleKey(XwValue *p)
     KbdAddEvent(pressed, (KeySym)keysym, NULL);
 }
 
+/****************************************************************************/
+/*
+ * The clipboard: CLIPBOARD and PRIMARY, both ways, fetched when asked for.
+ *
+ * When an application here takes a selection, the client is sent a token
+ * and takes the selection on its own display; when the client sends one,
+ * we take it here.  Contents travel only when someone pastes: a request
+ * from the client is passed to the owner here as a SelectionRequest; a
+ * request from an application here for a selection the client owns is
+ * passed to the client and answered when its reply comes.
+ *
+ * We are not an X client, so what an X client would do with a window of
+ * its own is done by watching four requests on their way to the dix:
+ * SetSelectionOwner (an application takes a selection), ConvertSelection
+ * (one asks for a selection we hold), SendEvent (the owner tells our
+ * window that the contents are there) and ChangeProperty (the next part
+ * of a large transfer, INCR).  Our window is an unmapped InputOnly child
+ * of the root, owned by serverClient; our selections are held with
+ * client NullClient, so the dix sends nothing to anyone on our behalf.
+ */
+
+#define XPRA_CLIP_SELECTIONS	2
+#define XPRA_CLIP_WAIT_MS	5000	/* for the other side's contents */
+#define XPRA_CLIP_MAX		(16 * 1024 * 1024)
+#define XPRA_CLIP_MAX_TARGETS	64
+#define XPRA_CLIP_ATOM(name) MakeAtom((char *)(name), strlen(name), TRUE)
+
+static const char *const xpraSelName[XPRA_CLIP_SELECTIONS] = {
+    "CLIPBOARD", "PRIMARY"
+};
+static Atom xpraSelAtom[XPRA_CLIP_SELECTIONS];
+static Bool xpraSelOurs[XPRA_CLIP_SELECTIONS];	/* held for the client */
+static Bool xpraSelWanted[XPRA_CLIP_SELECTIONS];	/* the client syncs it */
+/* the targets the client said it has, when it said */
+static Atom xpraSelTargets[XPRA_CLIP_SELECTIONS][XPRA_CLIP_MAX_TARGETS];
+static int xpraSelNTargets[XPRA_CLIP_SELECTIONS];
+
+static Bool xpraClipOn = FALSE;		/* the UI client does clipboards */
+static WindowPtr xpraSelWin = NULL;
+static XID xpraSelWinId = 0;
+static Atom atomTARGETS, atomTIMESTAMP, atomINCR, atomMULTIPLE, atomXPRA_SEL;
+static Atom atomATOM_PAIR;
+
+static int (*xpraOrigSetSelectionOwner)(ClientPtr) = NULL;
+static int (*xpraOrigConvertSelection)(ClientPtr) = NULL;
+static int (*xpraOrigSendEvent)(ClientPtr) = NULL;
+static int (*xpraOrigChangeProperty)(ClientPtr) = NULL;
+
+/* an application here waiting for the client's contents */
+typedef struct _XpraClipWait {
+    struct _XpraClipWait *next;
+    long id;
+    int sel;
+    ClientPtr client;
+    XID requestor;
+    Atom property, target;
+    CARD32 time;
+    CARD32 deadline;
+} XpraClipWait;
+
+static XpraClipWait *xpraClipWaits = NULL;
+static long xpraClipNextId = 1;
+
+/* the client waiting for an application's contents: one at a time */
+typedef struct _XpraClipFetch {
+    struct _XpraClipFetch *next;
+    long id;			/* the client's */
+    int sel;
+    Atom target;
+    Bool started, incr;
+    Atom type;			/* of the INCR parts */
+    int format;
+    CARD32 deadline;
+    XwBuf data;
+} XpraClipFetch;
+
+static XpraClipFetch *xpraClipFetches = NULL;	/* the first is the active one */
+
+static int
+xpraSelIndex(Atom selection)
+{
+    int i;
+
+    for (i = 0; i < XPRA_CLIP_SELECTIONS; i++) {
+	if (selection == xpraSelAtom[i])
+	    return i;
+    }
+    return -1;
+}
+
+static int
+xpraSelByName(XwValue *v)
+{
+    int i;
+
+    for (i = 0; i < XPRA_CLIP_SELECTIONS; i++) {
+	if (xwIsStr(v, xpraSelName[i]))
+	    return i;
+    }
+    return -1;
+}
+
+static Selection *
+xpraSelEntry(Atom selection)
+{
+    int i;
+
+    for (i = 0; i < NumCurrentSelections; i++) {
+	if (CurrentSelections[i].selection == selection)
+	    return &CurrentSelections[i];
+    }
+    return NULL;
+}
+
+/* our window, made when first needed (and again after a server reset) */
+static Bool
+xpraClipWindow(void)
+{
+    XID id;
+    int error = 0;
+    WindowPtr pWin;
+
+    if (xpraSelWin)
+	return TRUE;
+    id = FakeClientID(0);
+    pWin = CreateWindow(id, WindowTable[0], -10, -10, 1, 1, 0, InputOnly,
+			0, NULL, 0, serverClient, CopyFromParent, &error);
+    if (!pWin)
+	return FALSE;
+    if (!AddResource(id, RT_WINDOW, (pointer)pWin))
+	return FALSE;
+    xpraSelWin = pWin;
+    xpraSelWinId = id;
+    return TRUE;
+}
+
+static Bool
+xpraClientAlive(ClientPtr client)
+{
+    return client && client->index > 0 && client->index < currentMaxClients &&
+	clients[client->index] == client && !client->clientGone;
+}
+
+static void
+xpraClipSendNow(void)
+{
+    if (xpraUI && !xpraUI->dead)
+	xpraWrite(xpraUI);
+}
+
+/* the selection notify an application waits for, with or without contents */
+static void
+xpraClipNotifyApp(ClientPtr client, XID requestor, int sel, Atom target,
+		  Atom property, CARD32 time)
+{
+    xEvent ev;
+
+    if (!xpraClientAlive(client))
+	return;
+    memset(&ev, 0, sizeof(ev));
+    ev.u.u.type = SelectionNotify;
+    ev.u.selectionNotify.time = time;
+    ev.u.selectionNotify.requestor = requestor;
+    ev.u.selectionNotify.selection = xpraSelAtom[sel];
+    ev.u.selectionNotify.target = target;
+    ev.u.selectionNotify.property = property;
+    (void)TryClientEvents(client, &ev, 1, NoEventMask, NoEventMask, NullGrab);
+}
+
+/* give an application what it asked for; FALSE if it cannot be given */
+static Bool
+xpraClipGive(ClientPtr client, XID requestor, Atom property, Atom type,
+	     int format, unsigned long n, pointer data)
+{
+    WindowPtr pWin;
+
+    if (!xpraClientAlive(client))
+	return FALSE;
+    pWin = (WindowPtr)LookupIDByType(requestor, RT_WINDOW);
+    if (!pWin)
+	return FALSE;
+    return ChangeWindowProperty(pWin, property, type, format, PropModeReplace,
+				n, data, TRUE) == Success;
+}
+
+/* we hold the selection for the client: an application wants it */
+static void
+xpraClipAnswer(ClientPtr client, xConvertSelectionReq *req, int sel)
+{
+    Atom property = req->property != None ? req->property : req->target;
+    Selection *entry = xpraSelEntry(req->selection);
+    XpraClipWait *w;
+    const char *name;
+
+    if (req->target == atomTARGETS && xpraSelNTargets[sel] > 0) {
+	CARD32 atoms[XPRA_CLIP_MAX_TARGETS + 2];
+	int i, n = 0;
+
+	atoms[n++] = atomTARGETS;
+	atoms[n++] = atomTIMESTAMP;
+	for (i = 0; i < xpraSelNTargets[sel]; i++) {
+	    if (xpraSelTargets[sel][i] != atomTARGETS &&
+		xpraSelTargets[sel][i] != atomTIMESTAMP)
+		atoms[n++] = xpraSelTargets[sel][i];
+	}
+	if (!xpraClipGive(client, req->requestor, property, XA_ATOM, 32,
+			  (unsigned long)n, (pointer)atoms))
+	    property = None;
+	xpraClipNotifyApp(client, req->requestor, sel, req->target, property,
+			  req->time);
+	return;
+    }
+    if (req->target == atomTIMESTAMP && entry) {
+	CARD32 t = entry->lastTimeChanged.milliseconds;
+
+	if (!xpraClipGive(client, req->requestor, property, XA_INTEGER, 32, 1,
+			  (pointer)&t))
+	    property = None;
+	xpraClipNotifyApp(client, req->requestor, sel, req->target, property,
+			  req->time);
+	return;
+    }
+    name = NameForAtom(req->target);
+    if (req->target == atomMULTIPLE || !name || !xpraUI || !xpraClipOn) {
+	xpraClipNotifyApp(client, req->requestor, sel, req->target, None,
+			  req->time);
+	return;
+    }
+
+    w = (XpraClipWait *)calloc(1, sizeof(XpraClipWait));
+    if (!w) {
+	xpraClipNotifyApp(client, req->requestor, sel, req->target, None,
+			  req->time);
+	return;
+    }
+    w->id = xpraClipNextId++;
+    w->sel = sel;
+    w->client = client;
+    w->requestor = req->requestor;
+    w->property = property;
+    w->target = req->target;
+    w->time = req->time;
+    w->deadline = GetTimeInMillis() + XPRA_CLIP_WAIT_MS;
+    w->next = xpraClipWaits;
+    xpraClipWaits = w;
+
+    xpraBegin("clipboard-request");
+    xwPutInt(&xpraPkt, w->id);
+    xwPutStr(&xpraPkt, xpraSelName[sel]);
+    xwPutStr(&xpraPkt, name);
+    xpraSend(xpraUI);
+    xpraClipSendNow();
+    xpraSchedule(XPRA_IDLE_MS);		/* to see to the deadline */
+}
+
+static XpraClipWait *
+xpraClipTakeWait(long id)
+{
+    XpraClipWait **prev, *w;
+
+    for (prev = &xpraClipWaits; (w = *prev); prev = &w->next) {
+	if (w->id == id) {
+	    *prev = w->next;
+	    return w;
+	}
+    }
+    return NULL;
+}
+
+/* clipboard-contents: id, selection, type, format, encoding, data, truncated */
+static void
+xpraClipContents(XwValue *p)
+{
+    XpraClipWait *w = xpraClipTakeWait((long)xwInt(xwItem(p, 1), 0));
+    char typeName[128], encoding[16];
+    int format = (int)xwInt(xwItem(p, 4), 8);
+    XwValue *data = xwItem(p, 6), *v;
+    Atom type;
+    Bool ok = FALSE;
+
+    if (!w)
+	return;				/* too late, or never asked */
+    xwStr(xwItem(p, 3), typeName, sizeof(typeName));
+    xwStr(xwItem(p, 5), encoding, sizeof(encoding));
+    type = typeName[0] ? MakeAtom(typeName, strlen(typeName), TRUE) : None;
+
+    if (type == None || !data) {
+	/* nothing */
+    } else if (strcmp(encoding, "bytes") == 0 && format == 8 &&
+	       (data->type == XW_BYTES || data->type == XW_STR)) {
+	ok = xpraClipGive(w->client, w->requestor, w->property, type, 8,
+			  (unsigned long)data->n, (pointer)data->s);
+    } else if ((strcmp(encoding, "atoms") == 0 ||
+		strcmp(encoding, "integers") == 0) && data->type == XW_LIST &&
+	       (format == 32 || format == 16 || format == 8) &&
+	       data->n <= XPRA_CLIP_MAX / 4) {
+	Bool atoms = encoding[0] == 'a';
+	unsigned char *buf = (unsigned char *)malloc(data->n * 4 + 4);
+	size_t n = 0;
+
+	if (buf) {
+	    if (atoms)
+		format = 32;
+	    for (v = data->first; v; v = v->next, n++) {
+		unsigned long x;
+
+		if (atoms) {
+		    char name[256];
+
+		    xwStr(v, name, sizeof(name));
+		    x = name[0] ? MakeAtom(name, strlen(name), TRUE) : None;
+		} else {
+		    x = (unsigned long)xwInt(v, 0);
+		}
+		if (format == 32)
+		    ((CARD32 *)buf)[n] = (CARD32)x;
+		else if (format == 16)
+		    ((CARD16 *)buf)[n] = (CARD16)x;
+		else
+		    buf[n] = (unsigned char)x;
+	    }
+	    ok = xpraClipGive(w->client, w->requestor, w->property,
+			      atoms ? XA_ATOM : type, format, (unsigned long)n,
+			      (pointer)buf);
+	    /* the targets of a selection, kept for the next asker */
+	    if (ok && atoms && w->target == atomTARGETS) {
+		size_t i;
+
+		xpraSelNTargets[w->sel] = 0;
+		for (i = 0; i < n && i < XPRA_CLIP_MAX_TARGETS; i++)
+		    xpraSelTargets[w->sel][xpraSelNTargets[w->sel]++] =
+			((CARD32 *)buf)[i];
+	    }
+	    free(buf);
+	}
+    }
+    xpraClipNotifyApp(w->client, w->requestor, w->sel, w->target,
+		      ok ? w->property : None, w->time);
+    free(w);
+}
+
+/* an application here took a selection: the client takes it there */
+static void
+xpraClipToken(int sel)
+{
+    if (!xpraUI || !xpraClipOn || !xpraSelWanted[sel])
+	return;
+    xpraBegin("clipboard-token");
+    xwPutStr(&xpraPkt, xpraSelName[sel]);
+    xpraSend(xpraUI);
+    xpraClipSendNow();
+}
+
+/* the client took a selection: we hold it here for it */
+static void
+xpraClipClaim(int sel, XwValue *targets)
+{
+    Selection *entry;
+    XwValue *v;
+
+    if (!xpraClipWindow())
+	return;
+    xpraSelNTargets[sel] = 0;
+    if (targets && targets->type == XW_LIST) {
+	for (v = targets->first; v && xpraSelNTargets[sel] < XPRA_CLIP_MAX_TARGETS;
+	     v = v->next) {
+	    char name[256];
+
+	    xwStr(v, name, sizeof(name));
+	    if (name[0])
+		xpraSelTargets[sel][xpraSelNTargets[sel]++] =
+		    MakeAtom(name, strlen(name), TRUE);
+	}
+    }
+    UpdateCurrentTime();
+    entry = xpraSelEntry(xpraSelAtom[sel]);
+    if (!entry) {
+	Selection *more = (Selection *)xrealloc(CurrentSelections,
+	    (NumCurrentSelections + 1) * sizeof(Selection));
+
+	if (!more)
+	    return;
+	CurrentSelections = more;
+	entry = &CurrentSelections[NumCurrentSelections++];
+	entry->selection = xpraSelAtom[sel];
+    } else if (entry->client && entry->window != xpraSelWinId) {
+	xEvent ev;
+
+	/* what the dix tells the owner it replaces */
+	memset(&ev, 0, sizeof(ev));
+	ev.u.u.type = SelectionClear;
+	ev.u.selectionClear.time = currentTime.milliseconds;
+	ev.u.selectionClear.window = entry->window;
+	ev.u.selectionClear.atom = entry->selection;
+	(void)TryClientEvents(entry->client, &ev, 1, NoEventMask, NoEventMask,
+			      NullGrab);
+    }
+    entry->lastTimeChanged = currentTime;
+    entry->window = xpraSelWinId;
+    entry->pWin = xpraSelWin;
+    entry->client = NullClient;
+    xpraSelOurs[sel] = TRUE;
+}
+
+/* the client is gone: let go of what we held for it, answer who waits */
+static void
+xpraClipRelease(void)
+{
+    int i;
+
+    for (i = 0; i < XPRA_CLIP_SELECTIONS; i++) {
+	Selection *entry = xpraSelEntry(xpraSelAtom[i]);
+
+	if (entry && xpraSelWinId && entry->window == xpraSelWinId) {
+	    entry->window = None;
+	    entry->pWin = NULL;
+	    entry->client = NullClient;
+	}
+	xpraSelOurs[i] = FALSE;
+	xpraSelNTargets[i] = 0;
+    }
+    while (xpraClipWaits) {
+	XpraClipWait *w = xpraClipWaits;
+
+	xpraClipWaits = w->next;
+	xpraClipNotifyApp(w->client, w->requestor, w->sel, w->target, None,
+			  w->time);
+	free(w);
+    }
+    while (xpraClipFetches) {
+	XpraClipFetch *f = xpraClipFetches;
+
+	xpraClipFetches = f->next;
+	xwBufFree(&f->data);
+	free(f);
+    }
+    xpraClipOn = FALSE;
+}
+
+/* ---- the client asks for what an application here has ---- */
+
+static void xpraClipStartFetch(void);
+
+static void
+xpraClipNone(long id, int sel)
+{
+    if (!xpraUI)
+	return;
+    xpraBegin("clipboard-contents-none");
+    xwPutInt(&xpraPkt, id);
+    xwPutStr(&xpraPkt, xpraSelName[sel]);
+    xpraSend(xpraUI);
+    xpraClipSendNow();
+}
+
+/* the active fetch is over: send what it got (or nothing), start the next */
+static void
+xpraClipFinish(Bool ok, Atom type, int format, const unsigned char *data,
+	       unsigned long size)
+{
+    XpraClipFetch *f = xpraClipFetches;
+    const char *typeName = type != None ? NameForAtom(type) : NULL;
+    unsigned long n, i;
+
+    if (!f)
+	return;
+    xpraClipFetches = f->next;
+
+    if (!ok || !typeName || !xpraUI ||
+	(format != 8 && format != 16 && format != 32)) {
+	xpraClipNone(f->id, f->sel);
+    } else {
+	n = size;			/* in units of the format */
+	xpraBegin("clipboard-contents");
+	xwPutInt(&xpraPkt, f->id);
+	xwPutStr(&xpraPkt, xpraSelName[f->sel]);
+	xwPutStr(&xpraPkt, typeName);
+	xwPutInt(&xpraPkt, format);
+	if (format == 32 && (type == XA_ATOM || type == atomATOM_PAIR)) {
+	    xwPutStr(&xpraPkt, "atoms");
+	    xwListOpen(&xpraPkt);
+	    for (i = 0; i < n; i++) {
+		const char *name = NameForAtom(((const CARD32 *)data)[i]);
+
+		xwPutStr(&xpraPkt, name ? name : "");
+	    }
+	    xwClose(&xpraPkt);
+	} else if (format == 32 || format == 16) {
+	    xwPutStr(&xpraPkt, "integers");
+	    xwListOpen(&xpraPkt);
+	    for (i = 0; i < n; i++)
+		xwPutInt(&xpraPkt, format == 32 ? (long long)((const CARD32 *)data)[i]
+			 : (long long)((const CARD16 *)data)[i]);
+	    xwClose(&xpraPkt);
+	} else {
+	    xwPutStr(&xpraPkt, "bytes");
+	    xwPutBytes(&xpraPkt, data, (size_t)n);
+	}
+	xwPutInt(&xpraPkt, 0);		/* nothing left out */
+	xpraSend(xpraUI);
+	xpraClipSendNow();
+    }
+    /* only now: the data may be the property's */
+    if (xpraSelWin)
+	DeleteProperty(xpraSelWin, atomXPRA_SEL);
+    xwBufFree(&f->data);
+    free(f);
+    xpraClipStartFetch();
+}
+
+/* ask the owner of the first fetch's selection to put it on our window */
+static void
+xpraClipStartFetch(void)
+{
+    XpraClipFetch *f;
+    Selection *entry;
+    xEvent ev;
+
+    while ((f = xpraClipFetches) && !f->started) {
+	entry = xpraSelEntry(xpraSelAtom[f->sel]);
+	if (!entry || entry->window == None || !entry->client ||
+	    entry->window == xpraSelWinId || !xpraClipWindow()) {
+	    xpraClipFinish(FALSE, None, 8, NULL, 0);
+	    return;
+	}
+	f->started = TRUE;
+	f->deadline = GetTimeInMillis() + XPRA_CLIP_WAIT_MS;
+	DeleteProperty(xpraSelWin, atomXPRA_SEL);
+	UpdateCurrentTime();
+	memset(&ev, 0, sizeof(ev));
+	ev.u.u.type = SelectionRequest;
+	ev.u.selectionRequest.time = currentTime.milliseconds;
+	ev.u.selectionRequest.owner = entry->window;
+	ev.u.selectionRequest.requestor = xpraSelWinId;
+	ev.u.selectionRequest.selection = xpraSelAtom[f->sel];
+	ev.u.selectionRequest.target = f->target;
+	ev.u.selectionRequest.property = atomXPRA_SEL;
+	if (!TryClientEvents(entry->client, &ev, 1, NoEventMask, NoEventMask,
+			     NullGrab)) {
+	    xpraClipFinish(FALSE, None, 8, NULL, 0);
+	    return;
+	}
+	xpraSchedule(XPRA_IDLE_MS);	/* to see to the deadline */
+    }
+}
+
+/* clipboard-request: id, selection, target */
+static void
+xpraClipRequest(XwValue *p)
+{
+    long id = (long)xwInt(xwItem(p, 1), 0);
+    int sel = xpraSelByName(xwItem(p, 2));
+    char target[256];
+    XpraClipFetch *f, **last;
+
+    if (sel < 0)
+	return;				/* no answer can name it */
+    xwStr(xwItem(p, 3), target, sizeof(target));
+    if (!target[0] || !xpraSelWanted[sel]) {
+	xpraClipNone(id, sel);
+	return;
+    }
+    f = (XpraClipFetch *)calloc(1, sizeof(XpraClipFetch));
+    if (!f) {
+	xpraClipNone(id, sel);
+	return;
+    }
+    f->id = id;
+    f->sel = sel;
+    f->target = MakeAtom(target, strlen(target), TRUE);
+    xwBufInit(&f->data);
+    for (last = &xpraClipFetches; *last; last = &(*last)->next)
+	;
+    *last = f;
+    xpraClipStartFetch();
+}
+
+/* the property the owner put on our window, or NULL */
+static PropertyPtr
+xpraClipProp(void)
+{
+    PropertyPtr pProp;
+
+    if (!xpraSelWin)
+	return NULL;
+    for (pProp = wUserProps(xpraSelWin); pProp; pProp = pProp->next) {
+	if (pProp->propertyName == atomXPRA_SEL)
+	    return pProp;
+    }
+    return NULL;
+}
+
+/* the owner says the contents are on our window (or that there are none) */
+static void
+xpraClipNotified(Atom selection, Atom target, Atom property)
+{
+    XpraClipFetch *f = xpraClipFetches;
+    PropertyPtr pProp;
+
+    if (!f || !f->started || f->incr || xpraSelAtom[f->sel] != selection)
+	return;
+    if (property == None || !(pProp = xpraClipProp())) {
+	xpraClipFinish(FALSE, None, 8, NULL, 0);
+	return;
+    }
+    if (pProp->type == atomINCR) {
+	/* in parts: each one comes when we have taken the one before */
+	f->incr = TRUE;
+	f->deadline = GetTimeInMillis() + XPRA_CLIP_WAIT_MS;
+	xwBufReset(&f->data);
+	DeleteProperty(xpraSelWin, atomXPRA_SEL);
+	return;
+    }
+    if ((unsigned long)pProp->size * (pProp->format / 8) > XPRA_CLIP_MAX) {
+	xpraClipFinish(FALSE, None, 8, NULL, 0);
+	return;
+    }
+    xpraClipFinish(TRUE, pProp->type, pProp->format,
+		   (const unsigned char *)pProp->data, pProp->size);
+}
+
+/* a part of an INCR transfer has been put on our window */
+static void
+xpraClipIncrPart(void)
+{
+    XpraClipFetch *f = xpraClipFetches;
+    PropertyPtr pProp = xpraClipProp();
+    size_t bytes;
+
+    if (!f || !f->incr || !pProp)
+	return;
+    bytes = (size_t)pProp->size * (pProp->format / 8);
+    if (bytes == 0) {
+	unsigned long units = f->format ? f->data.len / (f->format / 8) : 0;
+
+	xpraClipFinish(f->format != 0, f->type, f->format ? f->format : 8,
+		       f->data.data, units);
+	return;
+    }
+    if (f->data.len + bytes > XPRA_CLIP_MAX ||
+	(f->format && f->format != pProp->format)) {
+	xpraClipFinish(FALSE, None, 8, NULL, 0);
+	return;
+    }
+    f->type = pProp->type;
+    f->format = pProp->format;
+    xwBufAppend(&f->data, (const unsigned char *)pProp->data, bytes);
+    f->deadline = GetTimeInMillis() + XPRA_CLIP_WAIT_MS;
+    DeleteProperty(xpraSelWin, atomXPRA_SEL);
+}
+
+/* from the timer: nobody waits for ever */
+static void
+xpraClipExpire(void)
+{
+    CARD32 now = GetTimeInMillis();
+    XpraClipWait **prev = &xpraClipWaits, *w;
+
+    while ((w = *prev)) {
+	if ((INT32)(now - w->deadline) >= 0) {
+	    *prev = w->next;
+	    xpraClipNotifyApp(w->client, w->requestor, w->sel, w->target, None,
+			      w->time);
+	    free(w);
+	} else {
+	    prev = &w->next;
+	}
+    }
+    if (xpraClipFetches && xpraClipFetches->started &&
+	(INT32)(now - xpraClipFetches->deadline) >= 0)
+	xpraClipFinish(FALSE, None, 8, NULL, 0);
+}
+
+/* ---- the four requests ---- */
+
+static int
+xpraSetSelectionOwner(ClientPtr client)
+{
+    REQUEST(xSetSelectionOwnerReq);
+    int rc = (*xpraOrigSetSelectionOwner)(client);
+    int sel;
+    Selection *entry;
+
+    if (rc != Success || client->req_len != sizeof(*stuff) >> 2)
+	return rc;
+    sel = xpraSelIndex(stuff->selection);
+    if (sel < 0)
+	return rc;
+    entry = xpraSelEntry(stuff->selection);
+    if (entry && entry->window == stuff->window && stuff->window != None &&
+	stuff->window != xpraSelWinId) {
+	xpraSelOurs[sel] = FALSE;
+	xpraSelNTargets[sel] = 0;
+	xpraClipToken(sel);
+    }
+    return rc;
+}
+
+static int
+xpraConvertSelection(ClientPtr client)
+{
+    REQUEST(xConvertSelectionReq);
+    Selection *entry;
+    int sel;
+
+    if (client->req_len != sizeof(*stuff) >> 2 || !xpraSelWinId)
+	return (*xpraOrigConvertSelection)(client);
+    sel = xpraSelIndex(stuff->selection);
+    entry = xpraSelEntry(stuff->selection);
+    if (sel < 0 || !entry || entry->window != xpraSelWinId)
+	return (*xpraOrigConvertSelection)(client);
+    if (!LookupWindow(stuff->requestor, client))
+	return BadWindow;
+    if (!ValidAtom(stuff->target) ||
+	(stuff->property != None && !ValidAtom(stuff->property))) {
+	client->errorValue = stuff->property;
+	return BadAtom;
+    }
+    xpraClipAnswer(client, stuff, sel);
+    return client->noClientException;
+}
+
+static int
+xpraSendEvent(ClientPtr client)
+{
+    REQUEST(xSendEventReq);
+
+    if (client->req_len == sizeof(*stuff) >> 2 && xpraSelWinId &&
+	stuff->destination == xpraSelWinId) {
+	/* for us, whom the dix cannot deliver to */
+	if ((stuff->event.u.u.type & 0x7f) == SelectionNotify)
+	    xpraClipNotified(stuff->event.u.selectionNotify.selection,
+			     stuff->event.u.selectionNotify.target,
+			     stuff->event.u.selectionNotify.property);
+	return client->noClientException;
+    }
+    return (*xpraOrigSendEvent)(client);
+}
+
+static int
+xpraChangeProperty(ClientPtr client)
+{
+    REQUEST(xChangePropertyReq);
+    XID window = 0;
+    Atom property = None;
+    int rc;
+
+    if (client->req_len >= sizeof(*stuff) >> 2) {
+	window = stuff->window;
+	property = stuff->property;
+    }
+    rc = (*xpraOrigChangeProperty)(client);
+    if (rc == Success && xpraSelWinId && window == xpraSelWinId &&
+	property == atomXPRA_SEL)
+	xpraClipIncrPart();
+    return rc;
+}
+
+/* once per server life: atoms, and the requests watched */
+static void
+xpraClipInit(void)
+{
+    int i;
+
+    for (i = 0; i < XPRA_CLIP_SELECTIONS; i++) {
+	xpraSelAtom[i] = XPRA_CLIP_ATOM(xpraSelName[i]);
+	xpraSelOurs[i] = FALSE;
+	xpraSelNTargets[i] = 0;
+    }
+    atomTARGETS = XPRA_CLIP_ATOM("TARGETS");
+    atomTIMESTAMP = XPRA_CLIP_ATOM("TIMESTAMP");
+    atomINCR = XPRA_CLIP_ATOM("INCR");
+    atomMULTIPLE = XPRA_CLIP_ATOM("MULTIPLE");
+    atomATOM_PAIR = XPRA_CLIP_ATOM("ATOM_PAIR");
+    atomXPRA_SEL = XPRA_CLIP_ATOM("_XPRA_SELECTION");
+    /* the window and what waited went with the reset */
+    xpraSelWin = NULL;
+    xpraSelWinId = 0;
+    xpraClipWaits = NULL;
+    xpraClipFetches = NULL;
+
+    if (!xpraOrigSetSelectionOwner) {
+	xpraOrigSetSelectionOwner = ProcVector[X_SetSelectionOwner];
+	ProcVector[X_SetSelectionOwner] = xpraSetSelectionOwner;
+	xpraOrigConvertSelection = ProcVector[X_ConvertSelection];
+	ProcVector[X_ConvertSelection] = xpraConvertSelection;
+	xpraOrigSendEvent = ProcVector[X_SendEvent];
+	ProcVector[X_SendEvent] = xpraSendEvent;
+	xpraOrigChangeProperty = ProcVector[X_ChangeProperty];
+	ProcVector[X_ChangeProperty] = xpraChangeProperty;
+    }
+}
+
+/* the UI client's hello: does it do clipboards, which ones */
+static void
+xpraClipHello(XwValue *caps)
+{
+    XwValue *v = xwGet(caps, "clipboard"), *sels;
+    int i;
+
+    xpraClipOn = v && ((v->type == XW_DICT && xwBool(xwGet(v, "enabled"), 1)) ||
+		       (v->type != XW_DICT && xwBool(v, 0)));
+    sels = v && v->type == XW_DICT ? xwGet(v, "selections") : NULL;
+    for (i = 0; i < XPRA_CLIP_SELECTIONS; i++)
+	xpraSelWanted[i] = xpraClipOn &&
+	    (!sels || sels->type != XW_LIST || xwListHas(sels, xpraSelName[i]));
+}
+
+/* tokens for what applications here hold when the client arrives */
+static void
+xpraClipAttached(void)
+{
+    int i;
+
+    for (i = 0; i < XPRA_CLIP_SELECTIONS; i++) {
+	Selection *entry = xpraSelEntry(xpraSelAtom[i]);
+
+	if (entry && entry->window != None && entry->client &&
+	    entry->window != xpraSelWinId)
+	    xpraClipToken(i);
+    }
+}
+
+/* clipboard packets from the UI client; FALSE if it is not one */
+static Bool
+xpraClipDispatch(XwValue *p)
+{
+    XwValue *type = xwItem(p, 0);
+    int sel, i;
+
+    if (xwIsStr(type, "clipboard-token")) {
+	sel = xpraSelByName(xwItem(p, 1));
+	if (sel >= 0 && xpraClipOn && xpraSelWanted[sel]) {
+	    /* claim, unless told not to (item 8 of a long token) */
+	    XwValue *claim = xwItem(p, 8);
+
+	    if (!claim || xwBool(claim, 1))
+		xpraClipClaim(sel, xwItem(p, 2));
+	}
+    } else if (xwIsStr(type, "clipboard-request")) {
+	xpraClipRequest(p);
+    } else if (xwIsStr(type, "clipboard-contents")) {
+	xpraClipContents(p);
+    } else if (xwIsStr(type, "clipboard-contents-none")) {
+	XpraClipWait *w = xpraClipTakeWait((long)xwInt(xwItem(p, 1), 0));
+
+	if (w) {
+	    xpraClipNotifyApp(w->client, w->requestor, w->sel, w->target, None,
+			      w->time);
+	    free(w);
+	}
+    } else if (xwIsStr(type, "clipboard-enable-selections")) {
+	XwValue *sels = xwItem(p, 1);
+
+	for (i = 0; i < XPRA_CLIP_SELECTIONS; i++)
+	    xpraSelWanted[i] = xpraClipOn && xwListHas(sels, xpraSelName[i]);
+    } else if (xwIsStr(type, "set-clipboard-enabled")) {
+	xpraClipOn = xwBool(xwItem(p, 1), 0);
+	for (i = 0; i < XPRA_CLIP_SELECTIONS; i++)
+	    xpraSelWanted[i] = xpraClipOn;
+    } else {
+	return FALSE;
+    }
+    return TRUE;
+}
+
+
 static void
 xpraSendHello(XpraClient *c)
 {
@@ -1667,6 +2542,25 @@ xpraSendHello(XpraClient *c)
     xwKeyBool(b, "sharing", 0);
     xwKeyBool(b, "lock", 0);
     xwKeyBool(b, "client-shutdown", 0);
+    /* the selections are synchronized both ways, fetched when pasted */
+    xwPutStr(b, "clipboard");
+    xwDictOpen(b);
+    xwKeyBool(b, "enabled", 1);
+    xwKeyBool(b, "notifications", 0);
+    xwKeyStr(b, "direction", "both");
+    xwPutStr(b, "selections");
+    xwListOpen(b);
+    xwPutStr(b, "CLIPBOARD");
+    xwPutStr(b, "PRIMARY");
+    xwClose(b);
+    xwPutStr(b, "preferred-targets");
+    xwListOpen(b);
+    xwPutStr(b, "UTF8_STRING");
+    xwPutStr(b, "TEXT");
+    xwPutStr(b, "STRING");
+    xwPutStr(b, "text/plain");
+    xwClose(b);
+    xwClose(b);
     xwKeyPair(b, "actual_desktop_size", rfbScreen.width, rfbScreen.height);
     xwKeyPair(b, "root_window_size", rfbScreen.width, rfbScreen.height);
     xwKeyPair(b, "desktop_size", rfbScreen.width, rfbScreen.height);
@@ -1725,15 +2619,19 @@ xpraHandleHello(XpraClient *c, XwValue *p)
 	return;
     }
 
-    if (xpraUI && xpraUI != c)
+    if (xpraUI && xpraUI != c) {
 	xpraDisconnect(xpraUI, "a new client has connected");
+	xpraClipRelease();
+    }
     xpraForgetAll();
     xpraUI = c;
     c->ui = TRUE;
+    xpraClipHello(caps);
     rfbLog("xpra: %s attached\n", c->name);
     xpraScan();
     xpraBegin("startup-complete");
     xpraSend(c);
+    xpraClipAttached();
     xpraWrite(c);
     xpraSchedule(XPRA_DEFER_MS);
 }
@@ -1767,6 +2665,8 @@ xpraDispatch(XpraClient *c, XwValue *p)
     if (!c->hello || c != xpraUI)
 	return;
 
+    if (xpraClipDispatch(p))
+	return;
     if (xwIsStr(type, "damage-sequence")) {
 	/* seq, wid, width, height, decode time, message */
 	if (c->unacked > 0)
@@ -2023,6 +2923,7 @@ xpraCloseClient(XpraClient *c, const char *why)
     if (c == xpraUI) {
 	rfbLog("xpra: %s detached\n", c->name);
 	xpraUI = NULL;
+	xpraClipRelease();
 	xpraForgetAll();
 	/* nothing it held down stays down */
 	KbdReleaseAllKeys();
@@ -2257,6 +3158,7 @@ xpraInit(void)
     atomUTF8_STRING = XPRA_ATOM("UTF8_STRING");
     atomNET_WM_WINDOW_TYPE = XPRA_ATOM("_NET_WM_WINDOW_TYPE");
     atomNET_WM_PID = XPRA_ATOM("_NET_WM_PID");
+    xpraClipInit();
 }
 
 /* called once the screen exists, see rfbScreenInit */

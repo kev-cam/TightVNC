@@ -132,12 +132,24 @@ window is visible, and only that part can be sent.
   the focus is raised, and what was covered arrives as it is repainted.
 - A window cannot be made larger than the screen.
 
-The pointer takes the shape the application gives it. Not there yet: the
-clipboard, the bell, lossy encodings (windows are sent losslessly, LZ4
-compressed), authentication on the TCP port.
+The pointer takes the shape the application gives it.
+
+**Clipboard.** CLIPBOARD and PRIMARY are shared both ways with the Xpra
+client (the stock one, or `xpra-view`): copy in either place, paste in the
+other. Contents travel only when something is pasted, so copying costs
+nothing; large ones (INCR) are fine, up to 16 MB. When the client leaves,
+what it had copied is let go here at once, so nothing waits for it. This
+is separate from TightVNC's own cut text for VNC viewers, which still goes
+through `CUT_BUFFER0` as before.
+
+Not there yet: the bell, lossy encodings (windows are sent losslessly,
+LZ4 compressed), authentication on the TCP port.
 
 The code: `hw/vnc/xpra_wire.c` is the wire format (packets, rencodeplus,
-LZ4) and nothing else; `hw/vnc/xpra.c` is the server side. Both under
+LZ4) and nothing else; `hw/vnc/xpra.c` is the server side (the clipboard is its own section: as
+the server is not an X client, it watches SetSelectionOwner,
+ConvertSelection, SendEvent and ChangeProperty on their way to the dix).
+Both under
 `vnc_unixsrc/Xvnc/programs/Xserver`.
 
 ## Tests
