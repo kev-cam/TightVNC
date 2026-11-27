@@ -1,7 +1,8 @@
 /*
  * clip - own or read an X selection, for the tests of xpra-view.
  *
- *   clip own SELECTION TEXT [CHUNK]   own it with TEXT until another takes it;
+ *   clip own SELECTION TEXT [CHUNK]   own it with TEXT until another takes it
+ *                                     (and a transfer under way is over);
  *                                     with CHUNK, texts longer than that go in
  *                                     parts (INCR)
  *   clip own SELECTION @FILE [CHUNK]  the same, with the contents of FILE
@@ -53,6 +54,7 @@ own(Atom selection, const char *text, size_t len, size_t chunk)
     Atom textA = XInternAtom(dpy, "TEXT", False);
     Atom incr = XInternAtom(dpy, "INCR", False);
     XEvent ev;
+    int lost = 0;
 
     XSetSelectionOwner(dpy, selection, w, CurrentTime);
     if (XGetSelectionOwner(dpy, selection) != w) {
@@ -62,9 +64,17 @@ own(Atom selection, const char *text, size_t len, size_t chunk)
     printf("owned\n");
     fflush(stdout);
     for (;;) {
-	XNextEvent(dpy, &ev);
-	if (ev.type == SelectionClear)
-	    return 0;
+	if (!lost) {
+	    XNextEvent(dpy, &ev);
+	} else if (incr_win == None || !wait_event(&ev, 10)) {
+	    return 0;		/* nothing under way, or its requestor gave up */
+	}
+	if (ev.type == SelectionClear) {
+	    /* another owns it now, but a transfer begun goes on to its end,
+	     * as a real owner's does (ICCCM): a requestor may be part way */
+	    lost = 1;
+	    continue;
+	}
 	if (ev.type == PropertyNotify && ev.xproperty.window == incr_win &&
 	    ev.xproperty.atom == incr_prop && ev.xproperty.state == PropertyDelete) {
 	    size_t n = len - incr_pos < chunk ? len - incr_pos : chunk;

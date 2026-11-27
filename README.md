@@ -70,7 +70,10 @@ Debian uses, which are the names the `vncserver` script in this tree runs:
 | `vncconnect/vncconnect` | `bin/tightvncconnect` |
 | `vncviewer/vncviewer` | `bin/xtightvncviewer` |
 
-and their manual pages in `share/man/man1`. On a machine that has
+and their manual pages in `share/man/man1`. After a `git pull`, run `make`
+before `make install`: install stops if a source has changed since it was
+compiled, or if the server's last build did not get as far as linking, so
+that it cannot put in the programs from before the change. On a machine that has
 Debian's `tightvncserver` package, the default `/usr/local` is enough to
 switch over without touching the package: `/usr/local/bin` comes before
 `/usr/bin` on the usual `PATH`, so `tightvncserver` and the `Xtightvnc` it
@@ -117,7 +120,7 @@ window manager; menus and other popups follow their window. Keys and
 pointer go back to the window they were made in. A VNC viewer can be
 connected at the same time. `xpra list`, `info`, `version` and `id` work;
 `xpra stop` is refused. One client shows the windows at a time, and a new
-one takes over, as with any Xpra server. Tested with the xpra 6.5.5 client.
+one takes over, as with any Xpra server. Tested with the xpra 6.5.5 and 7.0 clients.
 
 **What to know.** This X server is from before the Composite extension: it
 keeps one picture of the screen, so a window's pixels exist only where the
@@ -141,6 +144,13 @@ nothing; large ones (INCR) are fine, up to 16 MB. When the client leaves,
 what it had copied is let go here at once, so nothing waits for it. This
 is separate from TightVNC's own cut text for VNC viewers, which still goes
 through `CUT_BUFFER0` as before.
+
+This X server has no XFIXES extension either, which GTK applications use
+to hear that the clipboard has changed. Running inside it, they do not
+notice a copy made after they started, wherever it was made: a Paste menu
+item (and the shortcut that goes with it, as Ctrl+Shift+V in
+mate-terminal) can stay greyed out, while Ctrl+V in a text field and a
+middle click still paste.
 
 Not there yet: the bell, lossy encodings (windows are sent losslessly,
 LZ4 compressed), authentication on the TCP port.

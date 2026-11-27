@@ -40,9 +40,28 @@ PROGRAMS = \
 
 # Installs what is there and builds nothing (it is often run as root): the
 # X server has to have been built, the viewer and the rest go in if they were.
+# It stops if a source has changed since it was compiled (after a git pull,
+# say), or if the X server's last build did not get as far as linking it:
+# what would go in is then the programs from before, not what the tree has.
+# Only sources that have an object are looked at, so a file the build does
+# not compile cannot stop it.
 install:
 	@if [ ! -x Xvnc/programs/Xserver/Xvnc ]; then \
 	    echo "*** The X server has not been built: run make (or make server) first."; \
+	    exit 1; \
+	fi
+	@changed=$$(find Xvnc libvncauth vncviewer vncpasswd vncconnect -name '*.o' 2>/dev/null | \
+	    while read o; do \
+		c=$${o%.o}.c; \
+		if [ -e "$$c" ] && [ "$$c" -nt "$$o" ]; then echo "$$c"; break; fi; \
+	    done); \
+	if [ -n "$$changed" ]; then \
+	    echo "*** $$changed has changed since it was compiled: run make (or make server)"; \
+	    echo "*** first, or what goes in is the programs from before the change."; \
+	    exit 1; \
+	fi
+	@if [ -n "$$(find Xvnc -name '*.o' -newer Xvnc/programs/Xserver/Xvnc 2>/dev/null | head -1)" ]; then \
+	    echo "*** The X server's last build did not finish: run make (or make server) first."; \
 	    exit 1; \
 	fi
 	@$(INSTALL) -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(MAN1DIR)"

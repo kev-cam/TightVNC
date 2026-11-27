@@ -569,8 +569,55 @@ def test_install(start, ctx):
     need("make", "perl", "xauth", "xclock")
     if os.path.realpath(ctx.xvnc) != os.path.realpath(DEFAULT_XVNC):
         raise Skip("the server under test is not this tree's")
+
+    # A source changed since it was compiled (a git pull), or a build that
+    # stopped before the link: install says so and puts nothing in, instead
+    # of the programs from before; a source nothing is compiled from does not
+    # stop it.  Tried on a tree of stand-ins with this Makefile, so the real
+    # one is not touched (it may be shared, or in use by another run).
+    tree = os.path.join(ctx.dir, "tree")
+    vnc = os.path.join(tree, "Xvnc", "programs", "Xserver", "hw", "vnc")
+    os.makedirs(vnc)
+    shutil.copy2(os.path.join(TOP, "Makefile"), tree)
+    stand_ins = {"Xvnc/programs/Xserver/Xvnc": 0o755, "Xvnc/programs/Xserver/Xvnc.man": 0o644,
+                 "vncserver": 0o755, "vncserver.man": 0o644}
+    for name, mode in stand_ins.items():
+        with open(os.path.join(tree, name), "w") as f:
+            f.write("#!/bin/sh\n" if mode & 0o100 else ".TH STAND-IN 1\n")
+        os.chmod(os.path.join(tree, name), mode)
+    src, obj = os.path.join(vnc, "xpra.c"), os.path.join(vnc, "xpra.o")
+    server = os.path.join(tree, "Xvnc", "programs", "Xserver", "Xvnc")
+    for path in (src, obj):
+        open(path, "w").close()
+    t = time.time() - 100
+
+    def times(**when):
+        for path, at in ((src, when["src"]), (obj, when["obj"]), (server, when["server"])):
+            os.utime(path, (t + at, t + at))
+
+    def install(dest):
+        return subprocess.run(["make", "-C", tree, "install", "DESTDIR=" + dest, "PREFIX=/usr/local"],
+                              capture_output=True, text=True)
+
+    times(src=0, obj=10, server=20)
+    open(os.path.join(vnc, "unused.c"), "w").close()        # newer than all, but compiled into nothing
+    r = install(os.path.join(ctx.dir, "fresh"))
+    expect(r.returncode == 0, "make install, all built: " + (r.stdout + r.stderr)[-400:])
+    for when, what in (({"src": 30, "obj": 10, "server": 20}, "has changed since it was compiled"),
+                       ({"src": 0, "obj": 30, "server": 20}, "did not finish")):
+        times(**when)
+        stale = os.path.join(ctx.dir, "stale")
+        r = install(stale)
+        expect(r.returncode != 0 and what in r.stdout + r.stderr,
+               "make install with times %s: %s" % (when, (r.stdout + r.stderr)[-400:]))
+        expect(not os.path.exists(stale), "make install put things in all the same")
+
+    # The real tree: what is built goes in, under the names the script runs.
+    # Where, said on the command line: PREFIX may be in the environment, or
+    # come down from a make running this.
     dest = os.path.join(ctx.dir, "dest")
-    r = subprocess.run(["make", "-C", TOP, "install", "DESTDIR=" + dest], capture_output=True, text=True)
+    r = subprocess.run(["make", "-C", TOP, "install", "DESTDIR=" + dest, "PREFIX=/usr/local"],
+                       capture_output=True, text=True)
     expect(r.returncode == 0, "make install: " + (r.stdout + r.stderr)[-600:])
     bindir = os.path.join(dest, "usr", "local", "bin")
     for name in ("Xtightvnc", "tightvncserver", "tightvncpasswd"):
