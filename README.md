@@ -33,7 +33,8 @@ cd vnc_unixsrc
 smak server            # or: make server
 ```
 
-gives `Xvnc/programs/Xserver/Xvnc` (Debian installs it as `Xtightvnc`).
+gives the X server, `Xvnc/programs/Xserver/Xvnc`, and `vncpasswd`: what a
+machine that runs the server needs.
 
 `smak` with no target builds everything the machine has the headers for
 and says what it left out: `vncviewer` wants the X toolkit and `vncconnect`
@@ -50,16 +51,49 @@ take this code as nothing newer. Build from `vnc_unixsrc` or
 `vnc_unixsrc/Xvnc`, not from a directory further down: the definitions the
 whole server is compiled with are exported from there.
 
-## Running
-
-As any TightVNC: `vncserver :1` (the script passes options it does not
-know on to `Xvnc`), or `Xvnc` directly, which wants to be told where the
-fonts and the colour names are:
+## Installing
 
 ```
-Xvnc :1 -geometry 3200x2000 -depth 24 -rfbauth ~/.vnc/passwd \
-     -fp /usr/share/fonts/X11/misc/,/usr/share/fonts/X11/75dpi/ \
-     -co /usr/share/X11/rgb -xpra
+sudo make install                 # into /usr/local
+sudo make install PREFIX=/usr     # over a distribution's tightvncserver
+make uninstall                    # with the same PREFIX: takes them away again
+```
+
+installs what has been built (it builds nothing itself) under the names
+Debian uses, which are the names the `vncserver` script in this tree runs:
+
+| built | installed as |
+|---|---|
+| `Xvnc/programs/Xserver/Xvnc` | `bin/Xtightvnc` |
+| `vncserver` (a script) | `bin/tightvncserver` |
+| `vncpasswd/vncpasswd` | `bin/tightvncpasswd` |
+| `vncconnect/vncconnect` | `bin/tightvncconnect` |
+| `vncviewer/vncviewer` | `bin/xtightvncviewer` |
+
+and their manual pages in `share/man/man1`. On a machine that has
+Debian's `tightvncserver` package, the default `/usr/local` is enough to
+switch over without touching the package: `/usr/local/bin` comes before
+`/usr/bin` on the usual `PATH`, so `tightvncserver` and the `Xtightvnc` it
+starts are then these. Check with `command -v Xtightvnc`; a service that
+starts the server by its full path, or with a `PATH` of its own, has to be
+pointed at the new one. `/etc/tightvncserver.conf` is read if it is there
+and is not installed.
+
+## Running
+
+`tightvncserver :1` as with any TightVNC; options the script does not know
+go on to the X server, so
+
+```
+tightvncserver :1 -geometry 3200x2000 -xpra
+```
+
+is a desktop for VNC viewers whose windows Xpra clients can attach to as
+well. Or the X server directly (`Xvnc` in the build tree, `Xtightvnc`
+installed):
+
+```
+Xtightvnc :1 -geometry 3200x2000 -depth 24 -rfbauth ~/.vnc/passwd -xpra
 ```
 
 ## Sharing windows with Xpra
@@ -121,7 +155,9 @@ keeps a picture of every window from what it is sent, an RFB client
 fetches the framebuffer, and the two have to agree pixel for pixel. Also
 tested: typing, clicking, menus, resizing, closing, a second client taking
 over, the X server's reset, a VNC viewer across that reset, malformed
-input, a window manager, and the real `xpra` client under `Xvfb`. A test
+input, a window manager, the real `xpra` client under `Xvfb`, and `make
+install` followed by a session started with the installed
+`tightvncserver` script. A test
 whose programs are not installed (`xterm`, `xclock`, `xmessage`,
 `xwininfo`, a window manager, `xpra`, `Xvfb`) is skipped.
 

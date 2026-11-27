@@ -2104,7 +2104,10 @@ xpraListen(int sock, const char *what)
     rfbLog("Listening for Xpra connections on %s\n", what);
 }
 
-/* the socket "xpra attach :display" looks for: ~/.xpra/host-display */
+/*
+ * The socket "xpra attach :display" looks for: ~/.xpra/host-display.
+ * When there cannot be one, the log says why.
+ */
 static Bool
 xpraDefaultSocketPath(char *path, size_t size)
 {
@@ -2119,13 +2122,23 @@ xpraDefaultSocketPath(char *path, size_t size)
     host[0] = '\0';
     gethostname(host, sizeof(host) - 1);
     host[sizeof(host) - 1] = '\0';
-    if (!home || !host[0] || strlen(home) + 8 > sizeof(dir))
+    if (!home || !host[0]) {
+	rfbLog("xpra: no %s to name a socket in ~/.xpra by\n",
+	       home ? "host name" : "home directory");
 	return FALSE;
+    }
+    /* a unix socket's path has to fit in sockaddr_un: 107 bytes on Linux */
+    if (strlen(home) + strlen("/.xpra/") + strlen(host) + 1 +
+	strlen(display) + 1 > size || strlen(home) + 8 > sizeof(dir)) {
+	rfbLog("xpra: %s/.xpra/%s-%s is longer than a socket's path may be "
+	       "(%d bytes)\n", home, host, display, (int)size - 1);
+	return FALSE;
+    }
     sprintf(dir, "%s/.xpra", home);
-    if (mkdir(dir, 0700) < 0 && errno != EEXIST)
+    if (mkdir(dir, 0700) < 0 && errno != EEXIST) {
+	rfbLog("xpra: cannot make %s: %s\n", dir, strerror(errno));
 	return FALSE;
-    if (strlen(dir) + strlen(host) + strlen(display) + 3 > size)
-	return FALSE;
+    }
     snprintf(path, size, "%s/%s-%s", dir, host, display);
     return TRUE;
 }
@@ -2148,8 +2161,7 @@ xpraInitSockets(void)
 	    strcpy(xpraSocketPath, xpraSocketArg);
 	} else if (!xpraDefaultSocketPath(xpraSocketPath,
 					  sizeof(xpraSocketPath))) {
-	    rfbLog("xpra: cannot work out a socket path in ~/.xpra, "
-		   "use -xprasocket\n");
+	    rfbLog("xpra: give the socket a place with -xprasocket\n");
 	    FatalError("Xvnc: cannot set up the Xpra socket\n");
 	}
 	memset(&addr, 0, sizeof(addr));

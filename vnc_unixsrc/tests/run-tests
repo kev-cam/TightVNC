@@ -564,6 +564,73 @@ def test_failed_start(start, ctx):
     busy.close()
 
 
+def test_install(start, ctx):
+    """make install, and a session started with the installed tightvncserver script"""
+    need("make", "perl", "xauth", "xclock")
+    if os.path.realpath(ctx.xvnc) != os.path.realpath(DEFAULT_XVNC):
+        raise Skip("the server under test is not this tree's")
+    dest = os.path.join(ctx.dir, "dest")
+    r = subprocess.run(["make", "-C", TOP, "install", "DESTDIR=" + dest], capture_output=True, text=True)
+    expect(r.returncode == 0, "make install: " + (r.stdout + r.stderr)[-600:])
+    bindir = os.path.join(dest, "usr", "local", "bin")
+    for name in ("Xtightvnc", "tightvncserver", "tightvncpasswd"):
+        expect(os.access(os.path.join(bindir, name), os.X_OK), "%s was not installed: %s" % (name, r.stdout))
+        expect(os.path.exists(os.path.join(dest, "usr", "local", "share", "man", "man1", name + ".1")),
+               "no manual page for " + name)
+
+    # a home directory of its own, with a short name: the socket goes in it
+    home = tempfile.mkdtemp(prefix="tvnc-")
+    n = free_display()
+    env = dict(os.environ, HOME=home, PATH=bindir + os.pathsep + os.environ.get("PATH", ""),
+               XAUTHORITY=os.path.join(home, ".Xauthority"))
+    env.pop("DISPLAY", None)
+    started = False
+    try:
+        os.mkdir(os.path.join(home, ".vnc"), 0o700)
+        # What the session runs.  The script looks for ~/.vnc/xstartup, or
+        # for ~/.vncstartup when the home directory is under /tmp, and
+        # failing that writes one that starts the machine's whole desktop
+        # session: both are provided.
+        for startup in (os.path.join(home, ".vnc", "xstartup"), os.path.join(home, ".vncstartup")):
+            with open(startup, "w") as f:
+                f.write("#!/bin/sh\nxclock -geometry 150x150+10+10 &\n")
+            os.chmod(startup, 0o755)
+        p = subprocess.run([os.path.join(bindir, "tightvncpasswd"), "-f"], input=b"testpw12\n",
+                           capture_output=True)
+        expect(p.returncode == 0 and len(p.stdout) == 8, "tightvncpasswd -f: %r %r" % (p.stdout, p.stderr))
+        with open(os.path.join(home, ".vnc", "passwd"), "wb") as f:
+            f.write(p.stdout)
+        os.chmod(f.name, 0o600)
+
+        r = subprocess.run([os.path.join(bindir, "tightvncserver"), ":%d" % n, "-geometry", "1200x800",
+                            "-xpra"],
+                           env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        started = True
+        logs = "".join(open(os.path.join(home, ".vnc", f), errors="replace").read()
+                       for f in os.listdir(os.path.join(home, ".vnc")) if f.endswith(".log"))
+        expect(r.returncode == 0, "tightvncserver: " + (r.stdout + r.stderr + logs)[-800:])
+        xpra_dir = os.path.join(home, ".xpra")
+        sock = wait_for(lambda: os.path.isdir(xpra_dir) and
+                        [s for s in os.listdir(xpra_dir) if s.endswith("-%d" % n)], 6)
+        expect(sock, "no Xpra socket in ~/.xpra: " + logs[-600:])
+        c = XpraClient(os.path.join(xpra_dir, sock[0]))
+        c.attach()
+        expect(wait_for(lambda: c.pump(0.2) and c.find(cls="XClock"), 8),
+               "the session's window did not reach the Xpra client: %r" % list(c.windows.values()))
+        c.close()
+        k = subprocess.run([os.path.join(bindir, "tightvncserver"), "-kill", ":%d" % n],
+                           env=env, capture_output=True, text=True, timeout=30)
+        started = False
+        expect(k.returncode == 0, "tightvncserver -kill: " + k.stdout + k.stderr)
+        expect(wait_for(lambda: not os.path.exists("/tmp/.X11-unix/X%d" % n), 5),
+               "the server did not go away when killed")
+    finally:
+        if started:
+            subprocess.run([os.path.join(bindir, "tightvncserver"), "-kill", ":%d" % n],
+                           env=env, capture_output=True, timeout=30)
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_named_colours(start, ctx):
     """colour names are known without the server being told where the list is (-co)"""
     need("xsetroot", "xclock")

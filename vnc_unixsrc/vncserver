@@ -31,6 +31,18 @@
 
 # Please report all errors to Debian and not to ORL.
 
+# The password program: under the name Debian gives it where it is on the
+# PATH (which is also where "make install" of this tree puts it), under
+# the old name otherwise.
+
+$vncPasswd = "vncpasswd";
+foreach (split(/:/, $ENV{PATH})) {
+    if (-x "$_/tightvncpasswd") {
+	$vncPasswd = "tightvncpasswd";
+	last;
+    }
+}
+
 # First make sure we're operating in a sane environment.
 
 &SanityCheck();
@@ -203,7 +215,7 @@ if (-e _ && (!-f _ || !-o _)) {
 }
 if (!-e _ || ($mode & 077) != 0) {
     warn "\nYou will require a password to access your desktops.\n\n";
-    system("vncpasswd $quotedPasswdFile");
+    system("$vncPasswd $quotedPasswdFile");
     if (($? & 0xFF00) != 0) {
         exit 1;
     }
@@ -722,7 +734,7 @@ sub SanityCheck
     #
 
  cmd:
-    foreach $cmd ("uname","xauth","Xtightvnc","vncpasswd") {
+    foreach $cmd ("uname","xauth","Xtightvnc",$vncPasswd) {
 	for (split(/:/,$ENV{PATH})) {
 	    if (-x "$_/$cmd") {
 		next cmd;

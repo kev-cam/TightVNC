@@ -17,7 +17,54 @@ all: list_defines $(SUBDIRS)
 	@$(HAVE) $(VIEWER_HEADERS) || echo "note: vncviewer was not built, see above"
 	@$(HAVE) $(CONNECT_HEADERS) || echo "note: vncconnect was not built, see above"
 
-clean install: $(SUBDIRS)
+clean: $(SUBDIRS)
+
+# Where "make install" puts what has been built, and under which names:
+# the ones Debian gives them, which the vncserver script here runs
+# (Xtightvnc, tightvncpasswd).  In /usr/local/bin, which comes before
+# /usr/bin on the usual PATH, they take the place of a distribution's
+# tightvncserver without touching its files; "make install PREFIX=/usr"
+# overwrites those.  DESTDIR is put in front of everything, for packaging.
+PREFIX ?= /usr/local
+BINDIR = $(PREFIX)/bin
+MAN1DIR = $(PREFIX)/share/man/man1
+INSTALL ?= install
+
+# what is built : the name it is installed under : its manual page
+PROGRAMS = \
+    Xvnc/programs/Xserver/Xvnc:Xtightvnc:Xvnc/programs/Xserver/Xvnc.man \
+    vncserver:tightvncserver:vncserver.man \
+    vncpasswd/vncpasswd:tightvncpasswd:vncpasswd/vncpasswd.man \
+    vncconnect/vncconnect:tightvncconnect:vncconnect/vncconnect.man \
+    vncviewer/vncviewer:xtightvncviewer:vncviewer/vncviewer.man
+
+# Installs what is there and builds nothing (it is often run as root): the
+# X server has to have been built, the viewer and the rest go in if they were.
+install:
+	@if [ ! -x Xvnc/programs/Xserver/Xvnc ]; then \
+	    echo "*** The X server has not been built: run make (or make server) first."; \
+	    exit 1; \
+	fi
+	@$(INSTALL) -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(MAN1DIR)"
+	@for p in $(PROGRAMS); do \
+	    file=$${p%%:*}; rest=$${p#*:}; name=$${rest%%:*}; man=$${rest#*:}; \
+	    if [ -f "$$file" ]; then \
+		$(INSTALL) -m 755 "$$file" "$(DESTDIR)$(BINDIR)/$$name" || exit 1; \
+		$(INSTALL) -m 644 "$$man" "$(DESTDIR)$(MAN1DIR)/$$name.1" || exit 1; \
+		echo "installed $(DESTDIR)$(BINDIR)/$$name"; \
+	    else \
+		echo "not built, not installed: $$name"; \
+	    fi; \
+	done
+
+# takes away exactly the files "make install" puts there
+uninstall:
+	@for p in $(PROGRAMS); do \
+	    rest=$${p#*:}; name=$${rest%%:*}; \
+	    for f in "$(DESTDIR)$(BINDIR)/$$name" "$(DESTDIR)$(MAN1DIR)/$$name.1"; do \
+		if [ -f "$$f" ]; then unlink "$$f" && echo "removed $$f"; fi; \
+	    done; \
+	done
 
 list_defines:
 	$(CC) $(CPPFLAGS) $(CFLAGS) -x c -E -dM /dev/null | sort
@@ -32,7 +79,7 @@ libvncauth vncpasswd:
 # own, on which the X server depends, so that the recipes below stay plain
 # $(MAKE) lines.
 server-headers:
-	@if [ "$(MAKECMDGOALS)" = clean ] || [ "$(MAKECMDGOALS)" = install ]; then :; \
+	@if [ "$(MAKECMDGOALS)" = clean ]; then :; \
 	elif $(HAVE) $(SERVER_HEADERS); then :; \
 	else \
 	    echo "*** Xvnc needs zlib.h and jpeglib.h, and the compiler does not find them."; \
@@ -64,13 +111,16 @@ vncconnect:
 	    echo "*** vncconnect is not built: the compiler does not find X11/Xlib.h (libx11-dev)."; \
 	fi
 
-# the X server alone: needs zlib and libjpeg, none of the X libraries
+# What a machine that runs the server needs: the X server and vncpasswd
+# (the vncserver script, which is not built, asks it for the password).
+# Needs zlib and libjpeg, none of the X libraries.
 server: server-headers
 	$(MAKE) -C libvncauth all
+	$(MAKE) -C vncpasswd all
 	$(MAKE) -C Xvnc all
 
 # the tests of the server that has been built (tests/run-tests)
 check:
 	$(MAKE) -C tests check
 
-.PHONY: all clean install server server-headers check list_defines $(SUBDIRS)
+.PHONY: all clean install uninstall server server-headers check list_defines $(SUBDIRS)
