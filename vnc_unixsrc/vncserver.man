@@ -31,8 +31,11 @@ standard X server, but does not connect to a display for itself.
 Instead, \fBXvnc\fR creates a virtual desktop you can view or control
 remotely using a VNC viewer.
 .SH OPTIONS
-You can add \fBXvnc\fR options at the command line. They will be added
-to the invocation of Xvnc without changes. The options provided by the
+You can add \fBXvnc\fR options at the command line, before or after the
+display number. They will be added to the invocation of Xvnc without
+changes. Among them are \fB\-xpra\fR, \fB\-xprasocket\fR \fIpath\fR and
+\fB\-xpraport\fR \fIport\fR, which share the desktop's windows with Xpra
+clients as well (see \fBXvnc\fR(1)). The options provided by the
 \fBvncserver\fR itself are as follows:
 .TP
 \fB:\fR\fIdisplay\fR
@@ -90,6 +93,11 @@ Invokes \fBXvnc\fR on display :1.
 \fBvncserver\fR \fI\-geometry 800x600 \-depth 16 :1\fR
 Invokes \fBXvnc\fR on display :1 with desktop size of 800x600 pixels
 and color depth of 16 bits per pixel.
+.TP
+\fBvncserver\fR \fI:1 \-geometry 2560x1440 \-xpra\fR
+Invokes \fBXvnc\fR on display :1, whose windows Xpra clients can show
+one by one as well: \fBxpra attach :1\fR on this machine, \fBxpra attach
+ssh://\fR\fIhost\fR\fB/1\fR from another.
 .TP
 \fBvncserver\fR \fI\-kill :1\fR
 Shuts down \fBXvnc\fR server on display :1.

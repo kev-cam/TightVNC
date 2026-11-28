@@ -143,14 +143,17 @@ other. Contents travel only when something is pasted, so copying costs
 nothing; large ones (INCR) are fine, up to 16 MB. When the client leaves,
 what it had copied is let go here at once, so nothing waits for it. This
 is separate from TightVNC's own cut text for VNC viewers, which still goes
-through `CUT_BUFFER0` as before.
+through `CUT_BUFFER0` as before: there, only programs that use the cut
+buffer, such as xterm, exchange text with the viewer; GTK programs such as
+mate-terminal do not.
 
 This X server has no XFIXES extension either, which GTK applications use
 to hear that the clipboard has changed. Running inside it, they do not
 notice a copy made after they started, wherever it was made: a Paste menu
 item (and the shortcut that goes with it, as Ctrl+Shift+V in
-mate-terminal) can stay greyed out, while Ctrl+V in a text field and a
-middle click still paste.
+mate-terminal) can stay greyed out, while Ctrl+V in a text field, a
+middle click, and the Paste of mate-terminal's right-click menu (which
+looks again each time it opens) still paste.
 
 Not there yet: the bell, lossy encodings (windows are sent losslessly,
 LZ4 compressed), authentication on the TCP port.

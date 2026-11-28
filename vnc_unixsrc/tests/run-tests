@@ -678,6 +678,80 @@ def test_install(start, ctx):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_vncserver_options(start, ctx):
+    """tightvncserver: its help names -xpra; the display may come before or after Xtightvnc's options"""
+    need("perl", "xauth")
+    # The tree's script, with a stand-in for Xtightvnc on the PATH that writes
+    # down how it was run and stays long enough to look started.
+    bindir = os.path.join(ctx.dir, "bin")
+    os.mkdir(bindir)
+    with open(os.path.join(bindir, "Xtightvnc"), "w") as f:
+        f.write('#!/bin/sh\nprintf "%s\\n" "$@" > "$XVNC_ARGS"\nexec sleep 4\n')
+    os.chmod(f.name, 0o755)
+    args_file = os.path.join(ctx.dir, "xvnc-args")
+    home = tempfile.mkdtemp(prefix="tvnc-")     # under /tmp: the session runs ~/.vncstartup
+    env = dict(os.environ, HOME=home, PATH=bindir + os.pathsep + os.environ.get("PATH", ""),
+               XAUTHORITY=os.path.join(home, ".Xauthority"), XVNC_ARGS=args_file)
+    env.pop("DISPLAY", None)
+
+    def run(*args):
+        if os.path.exists(args_file):
+            os.unlink(args_file)
+        return subprocess.run(["perl", os.path.join(TOP, "vncserver")] + list(args), env=env,
+                              capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+
+    def display():
+        # free as the script sees it: no lock or socket, and the ports unused
+        for _ in range(50):
+            n = free_display()
+            try:
+                for port in (6000 + n, 5900 + n):
+                    with socket.socket() as s:
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        s.bind(("0.0.0.0", port))
+                return n
+            except OSError:
+                pass
+        raise AssertionError("no free display number with free ports")
+
+    try:
+        os.mkdir(os.path.join(home, ".vnc"), 0o700)
+        with open(os.path.join(home, ".vnc", "passwd"), "wb") as f:
+            f.write(b"\x01" * 8)
+        os.chmod(f.name, 0o600)
+        with open(os.path.join(home, ".vncstartup"), "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(f.name, 0o755)
+
+        r = run("-h")
+        for opt in ("-xpra", "-xprasocket", "-xpraport"):
+            expect(opt + " " in r.stderr, "tightvncserver -h does not name %s: %s" % (opt, r.stderr[-700:]))
+
+        for order in (["-xpra", ":N"], [":N", "-xpra"], ["-geometry", "800x600", "-xpra", ":N", "-localhost"]):
+            n = display()
+            args = [":%d" % n if a == ":N" else a for a in order]
+            what = "tightvncserver " + " ".join(args)
+            r = run(*args)
+            expect(r.returncode == 0, "%s: %s" % (what, (r.stdout + r.stderr)[-500:]))
+            expect(wait_for(lambda: os.path.exists(args_file), 5), what + ": Xtightvnc was not run")
+            got = open(args_file).read().split()
+            displays = [a for a in got if a.startswith(":") and a[1:].isdigit()]
+            expect(displays == [":%d" % n], "%s ran Xtightvnc with %s" % (what, got))
+            expect("-rfbport" in got and got[got.index("-rfbport") + 1] == str(5900 + n),
+                   "%s ran Xtightvnc with %s" % (what, got))
+            for opt in args:
+                expect(opt in got, "%s ran Xtightvnc with %s" % (what, got))
+            expect(":%d\n" % n in r.stderr, "%s says: %s" % (what, r.stderr[-300:]))
+
+        n, m = display(), display()
+        r = run(":%d" % n, "-xpra", ":%d" % m)
+        expect(r.returncode != 0 and "more than one display" in r.stderr,
+               "two displays: %s" % (r.stdout + r.stderr)[-300:])
+        expect(not os.path.exists(args_file), "two displays, and Xtightvnc was run")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_named_colours(start, ctx):
     """colour names are known without the server being told where the list is (-co)"""
     need("xsetroot", "xclock")

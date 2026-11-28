@@ -221,11 +221,17 @@ if (!-e _ || ($mode & 077) != 0) {
     }
 }
 
-# Find display number.
+# Find display number.  It may come before or after the options that go on
+# to Xtightvnc ("-xpra :1" as well as ":1 -xpra"): Xtightvnc runs on the last
+# display it is given, so it must be given this one and no other.
 
-if ((@ARGV > 0) && ($ARGV[0] =~ /^:(\d+)$/)) {
-    $displayNumber = $1;
-    shift(@ARGV);
+@displays = grep(/^:\d+$/, @ARGV);
+if (@displays > 1) {
+    die "$prog: more than one display: @displays\n";
+}
+if (@displays) {
+    ($displayNumber) = ($displays[0] =~ /^:(\d+)$/);
+    @ARGV = grep($_ ne $displays[0], @ARGV);
     unless (&CheckDisplayNumber($displayNumber)) {
 	die "A VNC server is already running as :$displayNumber\n";
     }
@@ -626,6 +632,13 @@ sub Usage
         "        -nevershared\n".
 	"        -pixelformat rgb<NNN>\n".
 	"        -pixelformat bgr<NNN>\n".
+	"\n".
+	"Xtightvnc's options for Xpra clients (Xtightvnc -help lists all of them):\n".
+	"\n".
+	"        -xpra                share the windows with Xpra clients as well:\n".
+	"                             xpra attach :<DISPLAY#>, or ssh://<HOST>/<DISPLAY#>\n".
+	"        -xprasocket <PATH>   the same, on this unix socket\n".
+	"        -xpraport <PORT>     the same, on this TCP port of the loopback interface\n".
 	"\n".
 	"See vncserver and Xtightvnc manual pages for more information.\n");
 }
