@@ -67,6 +67,7 @@
 #include "mipointer.h"
 #include "sprite.h"
 #include "selection.h"
+#include "buildid.h"	/* XVNCRELEASE, XVNCBUILD: written by the Makefile */
 #include "xpra.h"
 #include "xpra_wire.h"
 
@@ -223,10 +224,13 @@ xpraProcessArgument(int argc, char *argv[], int i)
 void
 xpraUseMsg(void)
 {
-    ErrorF("-xpra                  share the windows with Xpra clients, on a "
-	   "socket\n"
-	   "                       \"xpra attach :display\" finds "
-	   "(~/.xpra/host-display)\n");
+    ErrorF("-xpra                  let Xpra clients show the desktop's windows as\n"
+	   "                       well, each as a window of its own on their\n"
+	   "                       screen, with the clipboard shared; VNC viewers\n"
+	   "                       work as before.  One Xpra client at a time: a\n"
+	   "                       new one takes over.  On the unix socket\n"
+	   "                       ~/.xpra/host-display, where \"xpra attach\n"
+	   "                       :display\" (and xpra-view) look\n");
     ErrorF("-xprasocket path       the same, on this unix socket\n");
     ErrorF("-xpraport port         the same, on this TCP port of the "
 	   "loopback\n"
@@ -2512,7 +2516,7 @@ xpraSendHello(XpraClient *c)
     xpraBegin("hello");
     xwDictOpen(b);
     xwKeyStr(b, "version", XPRA_VERSION);
-    xwKeyStr(b, "tightvnc", XVNCRELEASE);
+    xwKeyStr(b, "tightvnc", XVNCRELEASE " (build " XVNCBUILD ")");
     xwKeyBool(b, "rencodeplus", 1);
     xwKeyBool(b, "lz4", 1);
     xwKeyBool(b, "none", 1);

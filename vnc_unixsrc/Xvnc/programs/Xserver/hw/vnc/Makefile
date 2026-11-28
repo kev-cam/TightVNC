@@ -11,24 +11,41 @@ OBJS = $(SRCS:.c=.o)
 INCS = -I. -I../../../../exports/include/X11 -I../../../../include/fonts -I../../cfb -I../../mfb -I../../mi -I../../include -I../../os -I../../../../../include -I../../../../exports/include
 DEFS += -DDDXOSINIT -DSERVER_LOCK -DDDXOSFATALERROR -DDDXTIME -DPART_NET
 
+# The release, and the commit the server is built from (vnc_unixsrc/build-id):
+# -version, the log and the Xpra hello say both.  buildid.h is written
+# again only when one of them changes, so that a build with nothing new
+# compiles nothing.
+RELEASE = TightVNC-1.3.11
+
 all: libvnc.a
 
 libvnc.a: $(OBJS)
 	$(RM) $@
 	$(AR) cqs $@ $^
 
-init.o: init.c
-	$(CC) -c $(CPPFLAGS) $(CFLAGS) -Wno-error=format-security $(DEFS) $(INCS) -DXVNCRELEASE=\"TightVNC-1.3.10\" -o $@ $<
+buildid.h: FORCE
+	@id=`sh ../../../../../build-id 2>/dev/null`; [ -n "$$id" ] || id=unknown; \
+	printf '#define XVNCRELEASE "%s"\n#define XVNCBUILD "%s"\n' '$(RELEASE)' "$$id" > buildid.h.new; \
+	if cmp -s buildid.h.new buildid.h; then rm -f buildid.h.new; else mv -f buildid.h.new buildid.h; fi
 
-xpra.o: xpra.c
-	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(DEFS) $(INCS) -DXVNCRELEASE=\"TightVNC-1.3.10\" -o $@ $<
+init.o: init.c buildid.h
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) -Wno-error=format-security $(DEFS) $(INCS) -o $@ $<
+
+xpra.o: xpra.c buildid.h
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(DEFS) $(INCS) -o $@ $<
 
 %.o: %.c
 	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(DEFS) $(INCS) -o $@ $<
 
 clean:
-	$(RM) $(OBJS) libvnc.a
+	$(RM) $(OBJS) libvnc.a buildid.h buildid.h.new
 
 install:
 
-.PHONY: all clean install
+# A command, not an empty rule: smak drops an empty rule's target as a
+# prerequisite in a sub-make, and then never remakes buildid.h.  Phony, or
+# "make -t" would make a file of that name, and buildid.h never again.
+FORCE:
+	@:
+
+.PHONY: all clean install FORCE

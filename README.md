@@ -1,10 +1,13 @@
-# TightVNC 1.3.10 for Unix, with Xpra window sharing
+# TightVNC 1.3.11 for Unix, with Xpra window sharing
 
 This is the last TightVNC release for Unix (1.3.10, March 2009) — the
 `Xvnc` X server, `vncviewer`, `vncpasswd`, `vncconnect` and the `vncserver`
 script — kept building on current systems, with one addition: the server
 can share its windows one by one with [Xpra](https://xpra.org) clients,
-next to showing the whole desktop to VNC viewers.
+next to showing the whole desktop to VNC viewers. The server, the
+`vncserver` script and `vncviewer` call themselves 1.3.11; the server and
+the script also say which commit they were built or installed from (see
+[Which build is running](#which-build-is-running)).
 
 Only `vnc_unixsrc` is built and tested here. `vnc_winsrc` and `vnc_javasrc`
 are the 1.3.10 Windows and Java sources as released, untouched.
@@ -81,6 +84,28 @@ starts are then these. Check with `command -v Xtightvnc`; a service that
 starts the server by its full path, or with a `PATH` of its own, has to be
 pointed at the new one. `/etc/tightvncserver.conf` is read if it is there
 and is not installed.
+
+### Which build is running
+
+```
+$ tightvncserver -version
+TightVNC Server version 1.3.11 (build 7a04f5d)
+Xvnc version TightVNC-1.3.11 (build 7a04f5d)
+```
+
+The first line is the script, with the commit it was installed from; the
+second is what `Xtightvnc -version` says, with the commit the server was
+built from. After the commit, `-dirty` means files under `vnc_unixsrc`
+had changes not committed, and `-unchecked` that git could not be asked
+about changes, so the commit was read from `.git`: the checkout belongs to
+another user than the one who built or installed (git then refuses to
+look, unless root runs it through the owner's own `sudo`), or git is
+missing. `unknown`: sources that are not a checkout, or a checkout whose
+`.git` cannot be read without git (reftable refs). A
+session's log (`~/.vnc/host:N.log`) starts with the server's line, and an
+Xpra client's `xpra info` shows it as `tightvnc`. Debian's `Xtightvnc
+-version` says `TightVNC-1.3.10`, with no build (and Debian's
+`tightvncserver` has no `-version`).
 
 ## Running
 

@@ -5,6 +5,8 @@
 *.a
 /vnc_unixsrc/Xvnc/exports/
 /vnc_unixsrc/Xvnc/programs/Xserver/Xvnc
+/vnc_unixsrc/Xvnc/programs/Xserver/hw/vnc/buildid.h
+/vnc_unixsrc/Xvnc/programs/Xserver/hw/vnc/buildid.h.new
 /vnc_unixsrc/vncpasswd/vncpasswd
 /vnc_unixsrc/vncconnect/vncconnect
 /vnc_unixsrc/vncviewer/vncviewer

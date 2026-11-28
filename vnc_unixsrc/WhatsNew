@@ -4,6 +4,24 @@
 |   in TightVNC source and binary archives.                          |
 +--------------------------------------------------------------------+
 
+* TightVNC 1.3.11 (github.com/kev-cam/TightVNC: 1.3.10 with Debian's
+  patches, and this)
+
+  - Unix Server: -xpra, -xprasocket and -xpraport let Xpra clients show
+    the desktop's windows as well, each as a window of its own, with
+    the clipboard shared both ways; VNC viewers work as before.
+
+  - Unix Server: -version (or --version), the log's first line and the
+    Xpra hello name the commit the server was built from.
+
+  - Unix: "make install" installs what has been built under Debian's
+    names, and stops if a source has changed since it was compiled.
+
+  - Unix: the vncserver script takes the display number before or after
+    the options it passes on, names -xpra in its -help, and has -version.
+
+  - Unix: builds with current compilers; tests in vnc_unixsrc/tests.
+
 * TightVNC 1.3.10
 
   - Windows Server: Impersonating currently logged on user while

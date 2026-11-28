@@ -624,6 +624,14 @@ def test_install(start, ctx):
         expect(os.access(os.path.join(bindir, name), os.X_OK), "%s was not installed: %s" % (name, r.stdout))
         expect(os.path.exists(os.path.join(dest, "usr", "local", "share", "man", "man1", name + ".1")),
                "no manual page for " + name)
+    # the script goes in with the commit it is installed from (its -version)
+    tree_id = subprocess.run(["sh", os.path.join(TOP, "build-id")], capture_output=True, text=True).stdout.strip()
+    head = git_head()
+    expect(not head or tree_id.startswith(head[:7]), "build-id says %s, git says %s" % (tree_id, head[:7]))
+    with open(os.path.join(bindir, "tightvncserver")) as f:
+        script = f.read()
+    expect("$buildId = '%s';" % tree_id in script and "@BUILD_ID@" not in script,
+           "the installed tightvncserver was not given the build %s" % tree_id)
 
     # a home directory of its own, with a short name: the socket goes in it
     home = tempfile.mkdtemp(prefix="tvnc-")
@@ -678,6 +686,211 @@ def test_install(start, ctx):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def git_head():
+    """The commit git says this checkout has, or "" (no git, or not ours to ask)."""
+    if not shutil.which("git"):
+        return ""
+    return subprocess.run(["git", "-C", TOP, "rev-parse", "--verify", "-q", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_build_id(start, ctx):
+    """build-id: the commit from git, or from .git when git refuses; never what a planted .git asks for"""
+    need("git")
+    script = os.path.join(TOP, "build-id")
+    work = tempfile.mkdtemp(prefix="bid-")      # outside this checkout
+    # git that refuses, as it does with another user's checkout
+    nogit = os.path.join(work, "nogit")
+    os.mkdir(nogit)
+    with open(os.path.join(nogit, "git"), "w") as f:
+        f.write("#!/bin/sh\necho 'fatal: detected dubious ownership' >&2\nexit 128\n")
+    os.chmod(f.name, 0o755)
+    refusing = dict(os.environ, PATH=nogit + os.pathsep + os.environ.get("PATH", ""))
+    # the throwaway repositories' git: none of this user's or this machine's
+    # settings (signing, hooks, default branch)
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    clean.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t",
+                 GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+    def git(repo, *args):
+        r = subprocess.run(["git", "-C", repo] + list(args), env=clean, capture_output=True, text=True)
+        expect(r.returncode == 0, "git %s: %s" % (" ".join(args), r.stderr))
+        return r.stdout.strip()
+
+    def build_id(where, env=None):
+        return subprocess.run(["sh", os.path.join(where, "build-id")], capture_output=True, text=True,
+                              env=env or os.environ, cwd="/").stdout
+
+    def checkout(name, at="sub"):
+        # A repository with build-id in a directory, top.c above.  aaa.c
+        # comes before build-id, so that an index of version 4 keeps only
+        # the end of build-id's path, as the real ones do.
+        repo = os.path.join(work, name)
+        os.makedirs(os.path.join(repo, at))
+        shutil.copy2(script, os.path.join(repo, at, "build-id"))
+        for path in (os.path.join(at, "aaa.c"), os.path.join(at, "file.c"), "top.c"):
+            with open(os.path.join(repo, path), "w") as f:
+                f.write("int x;\n")
+        git(repo, "init", "-q")
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "one")
+        return repo
+
+    def check(where, git_says, files_say, what):
+        for env, want in ((None, git_says), (refusing, files_say)):
+            got = build_id(where, env)
+            expect(got == want + "\n", "%s, git %s: %r, not %r" % (what, "refusing" if env else "working",
+                                                                     got, want))
+
+    try:
+        repo = checkout("plain")
+        branch = git(repo, "symbolic-ref", "--short", "HEAD")
+        sub = os.path.join(repo, "sub")
+        sha = git(repo, "rev-parse", "HEAD")[:7]
+        check(sub, sha, sha + "-unchecked", "a clean checkout")
+        with open(os.path.join(sub, "file.c"), "a") as f:
+            f.write("int y;\n")
+        check(sub, sha + "-dirty", sha + "-unchecked", "a change not committed")
+        git(repo, "commit", "-q", "-a", "-m", "two")
+        sha = git(repo, "rev-parse", "HEAD")[:7]
+        with open(os.path.join(repo, "top.c"), "a") as f:
+            f.write("int z;\n")
+        check(sub, sha, sha + "-unchecked", "a change outside the script's directory")
+        git(repo, "checkout", "-q", "--", "top.c")
+        git(repo, "pack-refs", "--all")
+        check(sub, sha, sha + "-unchecked", "refs packed")
+        git(repo, "checkout", "-q", "--detach", "HEAD~1")
+        old = git(repo, "rev-parse", "HEAD")[:7]
+        check(sub, old, old + "-unchecked", "a detached HEAD")
+        git(repo, "checkout", "-q", branch)
+        wt = os.path.join(work, "wt")
+        git(repo, "worktree", "add", "-q", "--detach", wt, "HEAD")
+        check(os.path.join(wt, "sub"), sha, sha + "-unchecked", "a worktree")
+        os.mkdir(os.path.join(sub, ".git"))     # no repository: git walks on past it, and so must build-id
+        check(sub, sha, sha + "-unchecked", "a stray empty .git directory")
+        os.rmdir(os.path.join(sub, ".git"))
+        git(repo, "checkout", "-q", "--orphan", "unborn")
+        check(sub, "unknown", "unknown", "a branch with no commit yet")
+
+        # git runs with no settings but the repository's own: none from the
+        # user's ~/.gitconfig or the caller's "git -c" (where a safe.directory
+        # could make it trust a planted repository) -- here, a command git
+        # would run for "status", which must not run
+        r = checkout("config")
+        s = git(r, "rev-parse", "HEAD")[:7]
+        ran = os.path.join(work, "fsmonitor-ran")
+        hook = os.path.join(work, "fsmonitor")
+        with open(hook, "w") as f:
+            f.write("#!/bin/sh\ntouch %s\nexit 1\n" % ran)
+        os.chmod(hook, 0o755)
+        home = os.path.join(work, "home")
+        os.mkdir(home)
+        with open(os.path.join(home, ".gitconfig"), "w") as f:
+            f.write("[core]\n\tfsmonitor = %s\n" % hook)
+        for what, env in (("~/.gitconfig", dict(os.environ, HOME=home, XDG_CONFIG_HOME=home)),
+                          ("git -c", dict(os.environ, GIT_CONFIG_PARAMETERS="'core.fsmonitor=%s'" % hook))):
+            subprocess.run(["git", "-C", r, "status", "--porcelain"], env=env, capture_output=True)
+            if not os.path.exists(ran):
+                continue        # this git does not run it there: nothing to show
+            os.unlink(ran)
+            got = build_id(os.path.join(r, "sub"), env)
+            expect(got == s + "\n" and not os.path.exists(ran),
+                   "a core.fsmonitor in %s: %r%s" % (what, got, " and git ran it" if os.path.exists(ran) else ""))
+
+        # index formats: version 4 compresses paths (not looked at), a split
+        # index keeps them in sharedindex.*
+        for name, args, shows in (("v4", ("update-index", "--index-version", "4"), "version 4"),
+                                  ("split", ("update-index", "--split-index"), "sharedindex")):
+            r = checkout(name)
+            git(r, *args)
+            gd = os.path.join(r, ".git")
+            with open(os.path.join(gd, "index"), "rb") as f:
+                made = f.read(8)[7] == 4 if name == "v4" else any(n.startswith("sharedindex.") for n in os.listdir(gd))
+            expect(made, "git did not make an index with %s" % shows)
+            s = git(r, "rev-parse", "HEAD")[:7]
+            check(os.path.join(r, "sub"), s, s + "-unchecked", "an index with " + shows)
+
+        # sources that are not a checkout: alone, inside another checkout,
+        # and at a path that ends one the other checkout tracks
+        alone = os.path.join(work, "alone", "sub")
+        os.makedirs(alone)
+        shutil.copy2(script, alone)
+        check(alone, "unknown", "unknown", "not a checkout")
+        outer = checkout("outer", "vendor/sub")
+        for at in ("copy/sub", "sub"):
+            inner = os.path.join(outer, at)
+            os.makedirs(inner)
+            shutil.copy2(script, inner)
+            check(inner, "unknown", "unknown", "an untracked copy at %s/ of a checkout tracking vendor/sub/" % at)
+
+        # A .git that asks for things: its HEAD and refs are data, never a
+        # program, and a path out of it is refused.
+        evil = checkout("evil")
+        marker = os.path.join(work, "ran")
+        secret = os.path.join(work, "secret")
+        with open(secret, "w") as f:
+            f.write("deadbeefcafe0123456789abcdef0123456789ab\n")
+        for head, packed in (("ref: x||e\n#\n", "touch %s x\n" % marker),
+                             ("ref: refs/x||w %s\n#\n" % marker, "anything x\n"),
+                             ("ref: refs/../../../secret\n", ""),
+                             ("ref: refs/heads/a.b\n", "%s refs/heads/a-b\n" % ("1" * 40))):
+            with open(os.path.join(evil, ".git", "HEAD"), "w") as f:
+                f.write(head)
+            with open(os.path.join(evil, ".git", "packed-refs"), "w") as f:
+                f.write(packed)
+            got = build_id(os.path.join(evil, "sub"), refusing)
+            expect(got == "unknown\n" and not os.path.exists(marker),
+                   "a .git with HEAD %r: %r%s" % (head, got, " and it ran a command" if os.path.exists(marker) else ""))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_version(start, ctx):
+    """-version names the release and the commit built from; so do the log, the Xpra hello, tightvncserver -version"""
+    need("perl")
+    release = "TightVNC-1.3.11"
+    lines = []
+    for opt in ("-version", "--version"):
+        r = subprocess.run([ctx.xvnc, opt], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        expect(r.returncode == 0 and r.stderr.startswith("Xvnc version %s (build " % release),
+               "Xvnc %s: %r %r" % (opt, r.stdout, r.stderr))
+        lines.append(r.stderr.strip())
+    expect(lines[0] == lines[1], "-version and --version differ: %s" % lines)
+    line = lines[0]
+    build = line[len("Xvnc version %s (build " % release):-1]
+    sha, _, rest = build.partition("-")
+    expect(build == "unknown" or (len(sha) == 7 and all(c in "0123456789abcdef" for c in sha) and
+                                  rest in ("", "dirty", "unchecked")), "not a build: %r" % line)
+    tree = subprocess.run(["sh", os.path.join(TOP, "build-id")], capture_output=True, text=True).stdout.strip()
+    head = git_head()
+    if head and os.path.realpath(ctx.xvnc) == os.path.realpath(DEFAULT_XVNC):
+        # this tree's server, built from the commit git says the tree has
+        # (unless one has been made since: make builds it again)
+        expect(sha == head[:7], "the server says build %s, the tree is at %s: run make" % (build, head[:7]))
+
+    srv = start()
+    with open(srv.log, errors="replace") as f:
+        expect(line in f.read(), "the log does not start with %r: %s" % (line, srv.tail(8)))
+    c = srv.client()
+    c.hello(request="info")
+    c.pump(5, lambda c: c.closed)
+    expect(c.server is not None and c.server.get("tightvnc") == "%s (build %s)" % (release, build),
+           "the Xpra hello: tightvnc=%r" % (c.server or {}).get("tightvnc"))
+
+    # the tree's script: its release, the build of this checkout, then the
+    # line of the Xtightvnc it runs
+    bindir = os.path.join(ctx.dir, "bin")
+    os.mkdir(bindir)
+    os.symlink(ctx.xvnc, os.path.join(bindir, "Xtightvnc"))
+    env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+    for opt in ("-version", "--version"):
+        r = subprocess.run(["perl", os.path.join(TOP, "vncserver"), opt], env=env, capture_output=True, text=True,
+                           timeout=20, stdin=subprocess.DEVNULL, cwd=ctx.dir)
+        want = "TightVNC Server version 1.3.11 (build %s)\n%s\n" % (tree, line)
+        expect(r.returncode == 0 and r.stdout == want,
+               "tightvncserver %s: %r, not %r (%s)" % (opt, r.stdout, want, r.stderr[-200:]))
+
+
 def test_vncserver_options(start, ctx):
     """tightvncserver: its help names -xpra; the display may come before or after Xtightvnc's options"""
     need("perl", "xauth")
@@ -688,6 +901,11 @@ def test_vncserver_options(start, ctx):
     with open(os.path.join(bindir, "Xtightvnc"), "w") as f:
         f.write('#!/bin/sh\nprintf "%s\\n" "$@" > "$XVNC_ARGS"\nexec sleep 4\n')
     os.chmod(f.name, 0o755)
+    # and the tree's vncpasswd, which the script wants on the PATH as well
+    passwd = os.path.join(TOP, "vncpasswd", "vncpasswd")
+    if not os.access(passwd, os.X_OK):
+        raise Skip("vncpasswd is not built (make server builds it)")
+    os.symlink(passwd, os.path.join(bindir, "tightvncpasswd"))
     args_file = os.path.join(ctx.dir, "xvnc-args")
     home = tempfile.mkdtemp(prefix="tvnc-")     # under /tmp: the session runs ~/.vncstartup
     env = dict(os.environ, HOME=home, PATH=bindir + os.pathsep + os.environ.get("PATH", ""),
@@ -726,6 +944,12 @@ def test_vncserver_options(start, ctx):
         r = run("-h")
         for opt in ("-xpra", "-xprasocket", "-xpraport"):
             expect(opt + " " in r.stderr, "tightvncserver -h does not name %s: %s" % (opt, r.stderr[-700:]))
+        # and says what -xpra does, and how to attach
+        said = " ".join(r.stderr.split())
+        for what in ("TightVNC Server version 1.3.11 (build ", "each as a window of its own",
+                     "clipboard shared", "~/.xpra/<HOST>-<DISPLAY#>", "xpra attach :<DISPLAY#>",
+                     "xpra attach ssh://<HOST>/<DISPLAY#>", "a new one takes over"):
+            expect(what in said, "tightvncserver -h does not say %r: %s" % (what, r.stderr[-900:]))
 
         for order in (["-xpra", ":N"], [":N", "-xpra"], ["-geometry", "800x600", "-xpra", ":N", "-localhost"]):
             n = display()

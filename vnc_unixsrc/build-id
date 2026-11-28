@@ -1,0 +1,137 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 D. Kevin Cameron
+#
+# build-id: the commit checked out in the git checkout this script is in, as
+# its first 7 hex digits, which the programs built here say they were built
+# from.  After it:
+#   -dirty      tracked files in this script's directory differ from it;
+#   -unchecked  git could not be asked about changes (the checkout belongs to
+#               another user, as when someone else of the group or root
+#               builds, or git is missing), so the commit was read from .git.
+# "unknown" outside a checkout, in a checkout that does not track this script
+# (a copy of the sources put inside some other repository), and in one whose
+# .git this script cannot read (reftable refs).
+#
+# Nothing under .git is trusted: it may be anybody's, and this runs as root
+# in "sudo make install".  So git runs with no configuration but the
+# repository's own, which it reads only for a repository that passes its
+# ownership check: no safe.directory from root's or the system's settings can
+# make it trust a planted one (a git command could run commands from it).
+# Otherwise the files are read as data only, and a .git is used only if
+# whoever owns the directory it is in owns it too.  Nothing is written, not
+# even git's index.
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+
+here=$(CDPATH= cd -P -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || { echo unknown; exit 0; }
+me=$(basename -- "$0")
+
+g() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent \
+	git -C "$here" "$@"
+}
+
+# git, when it agrees to look
+if sha=$(g rev-parse --verify -q HEAD 2>/dev/null) && [ -n "$sha" ]; then
+    if ! g ls-files --error-unmatch -- "$me" > /dev/null 2>&1; then
+	echo unknown
+	exit 0
+    fi
+    id=$(printf '%s\n' "$sha" | cut -c1-7)
+    if st=$(g --no-optional-locks status --porcelain --untracked-files=no -- . 2>/dev/null); then
+	[ -z "$st" ] || id=$id-dirty
+    else
+	id=$id-unchecked
+    fi
+    echo "$id"
+    exit 0
+fi
+
+# Otherwise the files.  The checkout's .git, where git would find it: a file
+# that names the real one (a worktree, a submodule), or a directory with
+# HEAD, objects and refs in it; refs may be in a common directory.
+owner() { ls -ldn -- "$1" 2>/dev/null | awk '{ print $3 }'; }
+first() { sed -n '1p;q' "$1" 2>/dev/null; }
+top=$here
+until [ -f "$top/.git" ] || { [ -f "$top/.git/HEAD" ] && [ -d "$top/.git/objects" ] && [ -d "$top/.git/refs" ]; }; do
+    if [ "$top" = / ]; then
+	echo unknown
+	exit 0
+    fi
+    top=$(dirname -- "$top")
+done
+o=$(owner "$top/.git")
+if [ -z "$o" ] || [ "$o" != "$(owner "$top")" ]; then
+    echo unknown
+    exit 0
+fi
+gitdir=$top/.git
+if [ -f "$gitdir" ]; then
+    gitdir=$(first "$gitdir" | sed -n 's/^gitdir: //p')
+    case $gitdir in
+    "") echo unknown; exit 0 ;;
+    /*) ;;
+    *) gitdir=$top/$gitdir ;;
+    esac
+fi
+common=$gitdir
+if [ -f "$gitdir/commondir" ]; then
+    common=$(first "$gitdir/commondir")
+    case $common in /*) ;; *) common=$gitdir/$common ;; esac
+fi
+
+# The checkout must track this script: its index names it.  Index versions
+# 2 and 3 hold each path whole, after the low byte of its length (or after
+# extended flags that end in a NUL) and before a NUL; a split index keeps
+# them in sharedindex.*.  Version 4 compresses the paths: not looked at.
+if [ "$here" = "$top" ]; then rel=$me; else rel=${here#"$top"/}/$me; fi
+v=$(od -An -tu1 -j7 -N1 "$gitdir/index" 2>/dev/null | tr -d ' \n')
+case $v in
+2|3)
+    if ! cat "$gitdir/index" "$gitdir"/sharedindex.* 2>/dev/null | LC_ALL=C tr '\000' '\n' |
+	LC_ALL=C awk -v r="$rel" '
+	    BEGIN { for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i; want = length(r) % 256 }
+	    {
+		n = length($0) - length(r)
+		if (n >= 0 && n <= 2 && substr($0, n + 1) == r && (n == 0 || ord[substr($0, n, 1)] == want)) {
+		    found = 1
+		    exit
+		}
+	    }
+	    END { exit !found }'
+    then
+	echo unknown
+	exit 0
+    fi
+    ;;
+esac
+
+sha=
+head=$(first "$gitdir/HEAD")
+case $head in
+"ref: refs/"*)
+    ref=${head#ref: }
+    case $ref in
+    *..*) ;;
+    *)
+	if [ -f "$gitdir/$ref" ]; then
+	    sha=$(first "$gitdir/$ref")
+	elif [ -f "$common/$ref" ]; then
+	    sha=$(first "$common/$ref")
+	elif [ -f "$common/packed-refs" ]; then
+	    sha=$(awk -v r="$ref" '$2 == r { print $1; exit }' "$common/packed-refs")
+	fi
+	;;
+    esac
+    ;;
+*)
+    sha=$head
+    ;;
+esac
+case ${#sha} in 40|64) ;; *) sha= ;; esac
+case $sha in
+"" | *[!0-9a-f]*) echo unknown ;;
+*) echo "$(printf '%s\n' "$sha" | cut -c1-7)-unchecked" ;;
+esac

@@ -81,6 +81,7 @@ from the X Consortium.
 #include "dix.h"
 #include "rfb.h"
 #include "xpra.h"
+#include "buildid.h"	/* XVNCRELEASE, XVNCBUILD: written by the Makefile */
 #include <time.h>
 
 #ifdef CORBA
@@ -374,8 +375,8 @@ ddxProcessArgument (argc, argv, i)
 	return 1;
     }
 
-    if (strcmp(argv[i], "-version") == 0) {
-	ErrorF("Xvnc version %s\n", XVNCRELEASE);
+    if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "--version") == 0) {
+	ErrorF("Xvnc version %s (build %s)\n", XVNCRELEASE, XVNCBUILD);
 	exit(0);
     }
 
@@ -401,7 +402,7 @@ InitOutput(screenInfo, argc, argv)
 {
     initOutputCalled = TRUE;
 
-    rfbLog("Xvnc version %s\n", XVNCRELEASE);
+    rfbLog("Xvnc version %s (build %s)\n", XVNCRELEASE, XVNCBUILD);
     rfbLog("Copyright (C) 2000-2009 TightVNC Group\n");
     rfbLog("Copyright (C) 1999 AT&T Laboratories Cambridge\n");
     rfbLog("All Rights Reserved.\n");
@@ -931,7 +932,8 @@ ddxUseMsg()
     ErrorF("-inetd                 Xvnc is launched by inetd\n");
     ErrorF("-compatiblekbd         set META key = ALT key as in the original "
 								"VNC\n");
-    ErrorF("-version               report Xvnc version on stderr\n");
+    ErrorF("-version, --version    report Xvnc's version and the commit it was\n"
+	   "                       built from (build) on stderr\n");
     xpraUseMsg();
     exit(1);
 }

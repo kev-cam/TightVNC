@@ -24,6 +24,8 @@ vncserver \- a wrapper to launch an X server for VNC.
 \fBvncserver\fR [\| \-clean \|] \-kill :\fIdisplay\fR
 .TP
 \fBvncserver\fR \-help
+.TP
+\fBvncserver\fR \-version
 .SH DESCRIPTION
 \fBvncserver\fR is a wrapper script for \fBXvnc\fR, the free X server
 for VNC (Virtual Network Computing). It provides all capabilities of a
@@ -34,9 +36,10 @@ remotely using a VNC viewer.
 You can add \fBXvnc\fR options at the command line, before or after the
 display number. They will be added to the invocation of Xvnc without
 changes. Among them are \fB\-xpra\fR, \fB\-xprasocket\fR \fIpath\fR and
-\fB\-xpraport\fR \fIport\fR, which share the desktop's windows with Xpra
-clients as well (see \fBXvnc\fR(1)). The options provided by the
-\fBvncserver\fR itself are as follows:
+\fB\-xpraport\fR \fIport\fR: with them, Xpra clients show the desktop's
+windows as well, each as a window of its own on their screen, with the
+clipboard shared, while VNC viewers work as before (see \fBXvnc\fR(1)).
+The options provided by the \fBvncserver\fR itself are as follows:
 .TP
 \fB:\fR\fIdisplay\fR
 The display number to use. If omitted, the next free display number
@@ -81,6 +84,14 @@ the tightvnc-java package to make this work).
 .TP
 \fB\-help\fR
 Prints a short usage notice to stderr.
+.TP
+\fB\-version\fR, \fB\-\-version\fR
+Prints the release and the commit the script was installed from, then
+the version line of the \fBXvnc\fR it runs, which names the commit that
+was built from.  After a commit, "\-dirty" and "\-unchecked" are as in
+\fBXvnc\fR(1): changes not committed, and changes that could not be
+checked; "unknown": not installed from a checkout.  Needs nothing else
+of what the script needs, not even an \fBXvnc\fR on the PATH.
 .SH EXAMPLES
 .TP
 \fBvncserver\fR

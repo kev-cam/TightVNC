@@ -43,6 +43,31 @@ foreach (split(/:/, $ENV{PATH})) {
     }
 }
 
+# The release, and the commit this script was installed from: "make install"
+# writes that in place of the mark.  Run from a checkout instead, the script
+# asks build-id beside it (beside the file, when it is run through a link).
+
+use Cwd 'abs_path';
+$version = "1.3.11";
+$buildId = '@BUILD_ID@';
+if ($buildId =~ /^\@/) {
+    ($here = (abs_path($0) || $0)) =~ s|/?[^/]*$||;
+    $here = "." if ($here eq "");
+    $idCommand = "sh " . &quotedString("$here/build-id") . " 2>/dev/null";
+    chomp($buildId = `$idCommand`);
+    $buildId = "unknown" if ($buildId eq "");
+}
+
+# -help and -version need none of what follows, not even an Xtightvnc.
+
+($prog) = ($0 =~ m|([^/]+)$|);
+foreach (@ARGV) {
+    &Usage() if ($_ eq "-help" || $_ eq "-h" || $_ eq "--help");
+}
+foreach (@ARGV) {
+    &Version() if ($_ eq "-version" || $_ eq "--version");
+}
+
 # First make sure we're operating in a sane environment.
 
 &SanityCheck();
@@ -138,7 +163,7 @@ chop($host = `uname -n`);
 # Check command line options
 
 &ParseOptions("-geometry",1,"-depth",1,"-pixelformat",1,"-name",1,"-kill",1,
-	      "-help",0,"-h",0,"--help",0,
+	      "-help",0,"-h",0,"--help",0,"-version",0,"--version",0,
 	      "-clean",0, "-fp",1,
               "-alwaysshared",0, "-nevershared",0,
               "-httpport",1,"-basehttpport",1);
@@ -616,10 +641,11 @@ sub removeSlashes
 
 sub Usage
 {
-    die("TightVNC Server version 1.3.10\n".
+    die("TightVNC Server version $version (build $buildId)\n".
 	"\n".
 	"Usage: $prog [<OPTIONS>] [:<DISPLAY#>]\n".
 	"       $prog -kill :<DISPLAY#>\n".
+	"       $prog -version\n".
 	"\n".
 	"<OPTIONS> are Xtightvnc options, or:\n".
 	"\n".
@@ -635,12 +661,39 @@ sub Usage
 	"\n".
 	"Xtightvnc's options for Xpra clients (Xtightvnc -help lists all of them):\n".
 	"\n".
-	"        -xpra                share the windows with Xpra clients as well:\n".
-	"                             xpra attach :<DISPLAY#>, or ssh://<HOST>/<DISPLAY#>\n".
+	"        -xpra                let Xpra clients show the desktop's windows too,\n".
+	"                             each as a window of its own on their screen, with\n".
+	"                             the clipboard shared; VNC viewers work as before.\n".
+	"                             One Xpra client at a time: a new one takes over.\n".
+	"                             It listens on ~/.xpra/<HOST>-<DISPLAY#>, which\n".
+	"                             only this user can open.  To attach:\n".
+	"                               here:      xpra attach :<DISPLAY#>\n".
+	"                                          (or xpra-view :<DISPLAY#>)\n".
+	"                               elsewhere: xpra attach ssh://<HOST>/<DISPLAY#>\n".
+	"                                          (logging in as this user)\n".
 	"        -xprasocket <PATH>   the same, on this unix socket\n".
-	"        -xpraport <PORT>     the same, on this TCP port of the loopback interface\n".
+	"        -xpraport <PORT>     the same, on this TCP port of the loopback\n".
+	"                             interface (no authentication: use ssh -L)\n".
 	"\n".
 	"See vncserver and Xtightvnc manual pages for more information.\n");
+}
+
+
+#
+# Version: this script's, and that of the Xtightvnc it runs
+#
+
+sub Version
+{
+    print "TightVNC Server version $version (build $buildId)\n";
+    foreach (split(/:/, $ENV{PATH})) {
+	if (-x "$_/Xtightvnc") {
+	    print `Xtightvnc -version 2>&1`;
+	    exit 0;
+	}
+    }
+    print "(no Xtightvnc on the PATH)\n";
+    exit 0;
 }
 
 

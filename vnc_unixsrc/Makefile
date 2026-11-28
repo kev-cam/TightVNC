@@ -44,7 +44,8 @@ PROGRAMS = \
 # say), or if the X server's last build did not get as far as linking it:
 # what would go in is then the programs from before, not what the tree has.
 # Only sources that have an object are looked at, so a file the build does
-# not compile cannot stop it.
+# not compile cannot stop it.  The vncserver script goes in with the commit
+# it is installed from (build-id) written into it, for its -version.
 install:
 	@if [ ! -x Xvnc/programs/Xserver/Xvnc ]; then \
 	    echo "*** The X server has not been built: run make (or make server) first."; \
@@ -65,10 +66,17 @@ install:
 	    exit 1; \
 	fi
 	@$(INSTALL) -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(MAN1DIR)"
-	@for p in $(PROGRAMS); do \
+	@id=$$(sh ./build-id 2>/dev/null); [ -n "$$id" ] || id=unknown; \
+	for p in $(PROGRAMS); do \
 	    file=$${p%%:*}; rest=$${p#*:}; name=$${rest%%:*}; man=$${rest#*:}; \
 	    if [ -f "$$file" ]; then \
-		$(INSTALL) -m 755 "$$file" "$(DESTDIR)$(BINDIR)/$$name" || exit 1; \
+		if [ "$$file" = vncserver ]; then \
+		    sed "s/@BUILD_ID@/$$id/" vncserver > "$(DESTDIR)$(BINDIR)/$$name.new" && \
+		    chmod 755 "$(DESTDIR)$(BINDIR)/$$name.new" && \
+		    mv -f "$(DESTDIR)$(BINDIR)/$$name.new" "$(DESTDIR)$(BINDIR)/$$name" || exit 1; \
+		else \
+		    $(INSTALL) -m 755 "$$file" "$(DESTDIR)$(BINDIR)/$$name" || exit 1; \
+		fi; \
 		$(INSTALL) -m 644 "$$man" "$(DESTDIR)$(MAN1DIR)/$$name.1" || exit 1; \
 		echo "installed $(DESTDIR)$(BINDIR)/$$name"; \
 	    else \

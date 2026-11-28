@@ -136,11 +136,24 @@ network input/output to stdin/stdout.
 Set META and ALT keys to the same X modifier flag, as in the original
 version of Xvnc by AT&T labs (TightVNC-specific).
 .TP
+\fB\-version\fR, \fB\-\-version\fR
+Print the release and the commit the server was built from (as
+"TightVNC\-1.3.11 (build 7a04f5d)") on the standard error, and exit.
+"\-dirty" after the commit means the sources had changes not committed;
+"\-unchecked", that git could not be asked about changes (the checkout
+belongs to another user than the one who built it, or git is missing), so
+the commit was read from .git; "unknown", that the sources were not a
+checkout git could tell about.
+The log's first line says the same, and so does the hello an Xpra client
+gets.
+.TP
 \fB\-xpra\fR
-Share the windows with Xpra clients as well (see XPRA below), on the unix
-socket \fI~/.xpra/host\-display\fR, which is where \fBxpra attach
-:display\fR and \fBxpra list\fR look.  Only the user who started the
-server can connect to it.
+Let Xpra clients show the desktop's windows as well, each as a window of
+its own on their screen, with the clipboard shared (see XPRA below); VNC
+viewers work as before.  One Xpra client at a time: a new one takes over.
+It listens on the unix socket \fI~/.xpra/host\-display\fR, which is where
+\fBxpra attach :display\fR, \fBxpra list\fR and \fBxpra\-view\fR look.
+Only the user who started the server can connect to it.
 .TP
 \fB\-xprasocket\fR \fIpath\fR
 The same, on this unix socket.
